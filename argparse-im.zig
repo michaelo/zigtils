@@ -22,6 +22,8 @@ const ParseError = error {
     InvalidFormat
 };
 
+const ArgList = []const []const u8;
+
 const Entry = struct {
     long: ?[]const u8,
     short: ?[]const u8,
@@ -61,14 +63,14 @@ const Argparse = struct {
         };
     }
 
-    fn checkHelp(self: *Self, args: []const []const u8) void {
+    fn checkHelp(self: *Self, args: ArgList) void {
         if(self.optionalFlag(args, "--help", "-h", "Prints help")) {
             self.gotHelp = true;
         }
     }
 
     // Returns true/false wether or not a given flag is encountered
-    fn optionalFlag(self: *Self, args: []const []const u8, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) bool {
+    fn optionalFlag(self: *Self, args: ArgList, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) bool {
         // TODO: verify no dupes
         self.discoveredParams.append(.{
             .long = long,
@@ -77,6 +79,10 @@ const Argparse = struct {
         }) catch {};
 
         for(args) |arg| {
+            // If we encounter something not flag/param-like: abort. Assumes it's a subcommand
+            // TODO: This is not enough if we are to support positional arguments, or space-separated arg-values
+            if(arg.len > 0 and arg[0] != '-') break;
+
             if(short) |key| {
                 if(std.mem.eql(u8, arg, key)) {
                     return true;
@@ -93,7 +99,7 @@ const Argparse = struct {
         return false;
     }
 
-    fn optionalParam(self: *Self, args: []const []const u8, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) ?[]const u8 {
+    fn optionalParam(self: *Self, args: ArgList, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) ?[]const u8 {
         // TODO: verify no dupes
         self.discoveredParams.append(.{
             .long = long,
@@ -106,6 +112,10 @@ const Argparse = struct {
         }
 
         var maybe_idx = for(args) |arg, i| {
+            // If we encounter something not flag/param-like: abort. Assumes it's a subcommand
+            // TODO: This is not enough if we are to support positional arguments, or space-separated arg-values
+            if(arg.len > 0 and arg[0] != '-') break null;
+
             if(short) |key| {
                 if(std.mem.startsWith(u8, arg, key ++ "=")) {
                     break i;
@@ -158,6 +168,16 @@ const Argparse = struct {
 
             writer.print("\t{s}\n", .{help}) catch {};
         }
+    }
+
+    fn subcommand(self: *const Self, args: ArgList, comptime command: []const u8) ?ArgList {
+        _ = self;
+        // Return the tail-slice after the subcommand-arg, if found. Otherwise null.
+        return for(args) |arg, i| {
+            if(std.mem.indexOf(u8, arg, command) != null) {
+                break args[i+1..];
+            }
+        } else null;
     }
 
     // Final step, will return true/false according to validations + print all 
@@ -232,17 +252,49 @@ test "argparse shall provide argument values" {
     argparse.showHelp(std.io.getStdErr().writer());
 }
 
-test "full waxels inputset" {
+test "subcommand" {
     var argparse = Argparse.init("Waxels", "0.0.1-testbuild");
-    defer {
-        if(!argparse.conclude()) {
-            std.process.exit(1);
-        }
-    }
 
-    // TBD: have default and type-info as param-set to optionalParam(), or as a separate fine-grained method?
-    var bitdepth = argparse.paramWithDefault(args, "--bitdepth", null, 16);
+    // --all is a subcommand-specific flag, and should not be "picked up" by the global flag extraction
+    var args = &.{"-v", "update","--all", "--input=file"};
+
+    // global flag
+    try testing.expect(argparse.optionalFlag(args, null, "-v", ""));
+
+    // sc-specific flag and param
+    try testing.expect(!argparse.optionalFlag(args, "--all", null, ""));
+    try testing.expect(argparse.optionalParam(args, "--input", null, "") == null);
+
+    var maybe_sc_update_args = argparse.subcommand(args, "update");
+    try testing.expect(maybe_sc_update_args != null);
+
+    var sc_update_args = maybe_sc_update_args.?;
+    try testing.expect(!argparse.optionalFlag(sc_update_args, null, "-v", ""));
+    try testing.expect(argparse.optionalFlag(sc_update_args, "--all", null, ""));
+    try testing.expectEqualStrings("file", argparse.optionalParam(sc_update_args, "--input", null, "").?);
+    
+    // try testing.expectEqualStrings("update", sc_update.)
+    // Every arg-check now belongs to the subcommand?
+    // TODO: Att! The main help needs to list all subcommands
+
 }
+
+// test "full waxels inputset" {
+//     var argparse = Argparse.init("Waxels", "0.0.1-testbuild");
+//     defer {
+//         if(!argparse.conclude()) {
+//             std.process.exit(1);
+//         }
+//     }
+
+//     var args = &.{"--bitdepth=16"};
+
+//     // TBD: have default and type-info as param-set to optionalParam(), or as a separate fine-grained method?
+//     var bitdepth = argparse.paramWithDefault(args, "--bitdepth", "-b", usize, 16);
+//     var bitdepth = argparse.paramWithDefault(args, "--bitdepth", "-b", usize, 16);
+//     _ = bitdepth;
+// }
+
 
 // notes
 //   - subcommand() can return a slice with only the subcommand-specific arguments
