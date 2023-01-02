@@ -1,22 +1,29 @@
 // "immediate mode"-argparse exploration
 // Currently requiring arguments to be comptile time known
+// Rules/features:
+//   support flags (boolean true/false)
+//   support params (key=value)
+//     params can be optional/required and of arbitrary destination types
+//   support subcommands
+//   support global vs subcommand-dependent flags/params
+// examples of supported arg variants:
+//   * --help
+//   * --key=value
+//   * mysubcommand
+//   * mysubcommand --help
+//   * mysubcommand --key=value
+// 
+// TBD:
+//   * support multiple identical, accumulated flags?
+//   
+// Background for strategy:
+// No-assumption to ideal structures for parsed arguments, and how they are used in the application, thus leaving it to the developer/argparse-user do programatically explicitly tie CLI to app-entry
+// 
 
 const std = @import("std");
 const testing = std.testing;
+const mtest = @import("mtest.zig");
 const print = std.debug.print;
-
-pub fn expectStringContains(actual: []const u8, expected_contains: []const u8) !void {
-    if (std.mem.indexOf(u8, actual, expected_contains) != null)
-        return;
-
-    print("\n======= expected to contain: =========\n", .{});
-    print("{s}\n", .{expected_contains});
-    print("\n======== actual contents: ============\n", .{});
-    print("{s}\n", .{actual});
-    print("\n======================================\n", .{});
-
-    return error.TestExpectedContains;
-}
 
 const ParseError = error {
     InvalidFormat
@@ -71,6 +78,7 @@ const Argparse = struct {
         };
     }
 
+    // Integrated help-check
     fn checkHelp(self: *Self, args: ArgList) void {
         if(self.optionalFlag(args, "--help", "-h", "Prints help")) {
             self.gotHelp = true;
@@ -241,8 +249,8 @@ test "argparse shall show help with -h/--help" {
     argparse.checkHelp(&.{"--help"});
     try testing.expect(!argparse.conclude(outputbuffer.writer()));
     
-    try expectStringContains(outputbuffer.items, "My app");
-    try expectStringContains(outputbuffer.items, "v1.0-test");
+    try mtest.expectStringContains(outputbuffer.items, "My app");
+    try mtest.expectStringContains(outputbuffer.items, "v1.0-test");
 }
 
 test "argparse help shall print all introduced flags/params" {
@@ -257,11 +265,11 @@ test "argparse help shall print all introduced flags/params" {
     _ = argparse.optionalFlag(args, "--verbose", "-v", "Prints lots more debug info");
     try testing.expect(!argparse.conclude(outputbuffer.writer()));
 
-    try expectStringContains(outputbuffer.items, "-h");
-    try expectStringContains(outputbuffer.items, "--help");
-    try expectStringContains(outputbuffer.items, "Prints help");
+    try mtest.expectStringContains(outputbuffer.items, "-h");
+    try mtest.expectStringContains(outputbuffer.items, "--help");
+    try mtest.expectStringContains(outputbuffer.items, "Prints help");
 
-    try expectStringContains(outputbuffer.items, "--verbose");
+    try mtest.expectStringContains(outputbuffer.items, "--verbose");
 }
 
 test "argparse shall provide argument values" {
@@ -315,8 +323,8 @@ test "subcommand shall show up in help" {
 
     _ = argparse.conclude(outputbuffer.writer());
 
-    try expectStringContains(outputbuffer.items, "init");
-    try expectStringContains(outputbuffer.items, "update");
+    try mtest.expectStringContains(outputbuffer.items, "init");
+    try mtest.expectStringContains(outputbuffer.items, "update");
 
 
     // debug
