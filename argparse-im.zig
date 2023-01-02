@@ -62,11 +62,14 @@ const Argparse = struct {
     name: []const u8,
     versionTag: []const u8,
     gotHelp: bool = false,
+
+    activeSubcommand: ?[]const u8 = null, // set if we encounter a subcommand
     
     // TODO: Make either dynamic, or comptime parameters for init()
     errors: std.BoundedArray([]const u8, 32),
     discoveredParams: std.BoundedArray(Entry, 128),
     discoveredSubcommands: std.BoundedArray(SubcommandEntry, 128),
+    discoveredSubcommandParams: std.BoundedArray(Entry, 128),
 
     fn init(name: []const u8, versionTag: []const u8) Self {
         return Self{
@@ -74,76 +77,87 @@ const Argparse = struct {
             .versionTag = versionTag,
             .errors = std.BoundedArray([]const u8, 32).init(0) catch unreachable,
             .discoveredParams = std.BoundedArray(Entry, 128).init(0) catch unreachable,
-            .discoveredSubcommands = std.BoundedArray(SubcommandEntry, 128).init(0) catch unreachable
+            .discoveredSubcommands = std.BoundedArray(SubcommandEntry, 128).init(0) catch unreachable,
+            .discoveredSubcommandParams = std.BoundedArray(Entry, 128).init(0) catch unreachable
         };
+    }
+
+    // Looks for argument of any type and returns index into arglist
+    fn findAndRegisterFlagOrParameter(
+            self: *Self,
+            args: ArgList,
+            comptime long: ?[]const u8,
+            comptime short: ?[]const u8,
+            help: []const u8,
+            paramType: enum { Flag, Param },
+            required: bool,
+            scope: enum { Global, UntilSubcommand }) ?usize {
+            
+        if(long == null and short == null) {
+            @compileError("both long and short variant can't be null");
+        }
+
+        _ = required;
+        // TODO: Check for dupes?
+        var paramsList = if(self.activeSubcommand == null) &self.discoveredParams else &self.discoveredSubcommandParams;
+        paramsList.append(.{
+            .long = long,
+            .short = short,
+            .help = help
+        }) catch {};
+
+        var idx_or_null = for(args) |arg, i| {
+            // If we encounter something not flag/param-like: abort. Assumes it's a subcommand
+            // TODO: This is not enough if we are to support positional arguments, or space-separated arg-values
+            if(scope != .Global and arg.len > 0 and arg[0] != '-') break null;
+
+            if(short) |key| {
+                switch(paramType) {
+                    .Param => {
+                        if(std.mem.startsWith(u8, arg, key ++ "=")) {
+                            break i;
+                        }
+                    },
+                    .Flag => {
+                        if(std.mem.eql(u8, arg, key)) {
+                            break i;
+                        }
+                    }
+                }
+            }
+
+            if(long) |key| {
+                switch(paramType) {
+                    .Param => {
+                        if(std.mem.startsWith(u8, arg, key ++ "=")) {
+                            break i;
+                        }
+                    },
+                    .Flag => {
+                        if(std.mem.eql(u8, arg, key)) {
+                            break i;
+                        }
+                    }
+                }
+            }
+        } else null;
+
+        return idx_or_null;
     }
 
     // Integrated help-check
     fn checkHelp(self: *Self, args: ArgList) void {
-        if(self.optionalFlag(args, "--help", "-h", "Prints help")) {
-            self.gotHelp = true;
-        }
+        self.gotHelp = self.findAndRegisterFlagOrParameter(args, "--help", "-h", "Prints help", .Flag, false, .Global) != null;
     }
 
     // Returns true/false wether or not a given flag is encountered
     fn optionalFlag(self: *Self, args: ArgList, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) bool {
         // TODO: verify no dupes
-        self.discoveredParams.append(.{
-            .long = long,
-            .short = short,
-            .help = help
-        }) catch {};
-
-        for(args) |arg| {
-            // If we encounter something not flag/param-like: abort. Assumes it's a subcommand
-            // TODO: This is not enough if we are to support positional arguments, or space-separated arg-values
-            if(arg.len > 0 and arg[0] != '-') break;
-
-            if(short) |key| {
-                if(std.mem.eql(u8, arg, key)) {
-                    return true;
-                }
-            }
-
-            if(long) |key| {
-                if(std.mem.eql(u8, arg, key)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return self.findAndRegisterFlagOrParameter(args, long, short, help, .Flag, false, .UntilSubcommand) != null;
     }
 
     fn optionalParam(self: *Self, args: ArgList, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) ?[]const u8 {
-        // TODO: verify no dupes
-        self.discoveredParams.append(.{
-            .long = long,
-            .short = short,
-            .help = help
-        }) catch {};
-
-        if(long == null and short == null) {
-            @compileError("both long and short variant can't be null");
-        }
-
-        var maybe_idx = for(args) |arg, i| {
-            // If we encounter something not flag/param-like: abort. Assumes it's a subcommand
-            // TODO: This is not enough if we are to support positional arguments, or space-separated arg-values
-            if(arg.len > 0 and arg[0] != '-') break null;
-
-            if(short) |key| {
-                if(std.mem.startsWith(u8, arg, key ++ "=")) {
-                    break i;
-                }
-            }
-
-            if(long) |key| {
-                if(std.mem.startsWith(u8, arg, key ++ "=")) {
-                    break i;
-                }
-            }
-        } else null;
+        var maybe_idx = self.findAndRegisterFlagOrParameter(args, long, short, help, .Param, false, .UntilSubcommand);
 
         if(maybe_idx) |idx| {
             // Extract value
@@ -169,17 +183,42 @@ const Argparse = struct {
 
         // subcommands
 
-        if(self.discoveredSubcommands.len > 0) {
-            writer.print("Subcommands:\n", .{}) catch {};
-            for(self.discoveredSubcommands.slice()) |sc| {
-                writer.print("  {s}\t{s}\n", .{sc.name, sc.help}) catch {};
+        if(self.activeSubcommand) |activeSubcommand| {
+            if(self.discoveredSubcommandParams.len > 0) {
+                writer.print("{s} arguments:\n", .{activeSubcommand}) catch {};
+
+                for(self.discoveredSubcommandParams.slice()) |param| {
+                    var help = param.help;
+
+                    // padding
+                    writer.print("  ", .{}) catch {};
+                    if(param.short) |key| {
+                        writer.print("{s}", .{key}) catch {};
+                    }
+                    if(param.short != null and param.long != null) {
+                        writer.print(",", .{}) catch {};
+                    }
+                    if(param.long) |key| {
+                        writer.print("{s}", .{key}) catch {};
+                    }      
+
+                    writer.print("\t{s}\n", .{help}) catch {};
+                }
+                writer.print("\n", .{}) catch {};
             }
-            writer.print("\n", .{}) catch {};
+        } else {
+            if(self.discoveredSubcommands.len > 0) {
+                writer.print("Subcommands:\n", .{}) catch {};
+                for(self.discoveredSubcommands.slice()) |sc| {
+                    writer.print("  {s}\t{s}\n", .{sc.name, sc.help}) catch {};
+                }
+                writer.print("\n", .{}) catch {};
+            }
         }
 
         // global params
         if(self.discoveredParams.len > 0) {
-            writer.print("Arguments:\n", .{}) catch {};
+            writer.print("Global arguments:\n", .{}) catch {};
             for(self.discoveredParams.slice()) |param| {
                 var help = param.help;
 
@@ -209,6 +248,7 @@ const Argparse = struct {
         // Return the tail-slice after the subcommand-arg, if found. Otherwise null.
         return for(args) |arg, i| {
             if(std.mem.indexOf(u8, arg, command) != null) {
+                self.activeSubcommand = arg;
                 break args[i+1..];
             }
         } else null;
@@ -325,7 +365,30 @@ test "subcommand shall show up in help" {
 
     try mtest.expectStringContains(outputbuffer.items, "init");
     try mtest.expectStringContains(outputbuffer.items, "update");
+}
 
+test "--help shall print help-text nicely lined up" {
+
+}
+
+test "subcommand --help shall show subcommand-specific help/params" {
+    var argparse = Argparse.init("My app", "1.0");
+    var args = &.{"init", "--help"};
+
+    argparse.checkHelp(args);
+
+    if(argparse.subcommand(args, "init", "help-text")) |sc_args| {
+        _ = argparse.optionalFlag(sc_args, "--force", "-f", "force-help-text");
+    }
+    _ = argparse.subcommand(args, "update", "help-text");
+
+    var outputbuffer = std.ArrayList(u8).init(std.testing.allocator);
+    defer outputbuffer.deinit();
+
+    _ = argparse.conclude(outputbuffer.writer());
+    
+    try mtest.expectStringContains(outputbuffer.items, "init");
+    try mtest.expectStringNotContains(outputbuffer.items, "update");
 
     // debug
     argparse.showHelp(std.io.getStdErr().writer());
