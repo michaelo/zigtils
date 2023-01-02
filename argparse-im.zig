@@ -30,6 +30,11 @@ const Entry = struct {
     help: []const u8,
 };
 
+const SubcommandEntry = struct {
+    name: []const u8,
+    help: []const u8,
+};
+
 // Common parser functions
 
 pub inline fn parseInt(val: []const u8) ParseError!usize {
@@ -49,17 +54,20 @@ const Argparse = struct {
 
     name: []const u8,
     versionTag: []const u8,
-    errors: std.BoundedArray([]const u8, 32),
     gotHelp: bool = false,
-
+    
+    // TODO: Make either dynamic, or comptime parameters for init()
+    errors: std.BoundedArray([]const u8, 32),
     discoveredParams: std.BoundedArray(Entry, 128),
+    discoveredSubcommands: std.BoundedArray(SubcommandEntry, 128),
 
     fn init(name: []const u8, versionTag: []const u8) Self {
         return Self{
             .name = name,
             .versionTag = versionTag,
             .errors = std.BoundedArray([]const u8, 32).init(0) catch unreachable,
-            .discoveredParams = std.BoundedArray(Entry, 128).init(0) catch unreachable
+            .discoveredParams = std.BoundedArray(Entry, 128).init(0) catch unreachable,
+            .discoveredSubcommands = std.BoundedArray(SubcommandEntry, 128).init(0) catch unreachable
         };
     }
 
@@ -151,27 +159,45 @@ const Argparse = struct {
     fn showHelp(self: *const Self, writer: anytype) void {
         writer.print("{s} {s}\n\n", .{self.name, self.versionTag}) catch {};
 
-        for(self.discoveredParams.slice()) |param| {
-            var help = param.help;
+        // subcommands
 
-            // padding
-            writer.print("  ", .{}) catch {};
-            if(param.short) |key| {
-                writer.print("{s}", .{key}) catch {};
+        if(self.discoveredSubcommands.len > 0) {
+            writer.print("Subcommands:\n", .{}) catch {};
+            for(self.discoveredSubcommands.slice()) |sc| {
+                writer.print("  {s}\t{s}\n", .{sc.name, sc.help}) catch {};
             }
-            if(param.short != null and param.long != null) {
-                writer.print(",", .{}) catch {};
-            }
-            if(param.long) |key| {
-                writer.print("{s}", .{key}) catch {};
-            }      
+            writer.print("\n", .{}) catch {};
+        }
 
-            writer.print("\t{s}\n", .{help}) catch {};
+        // global params
+        if(self.discoveredParams.len > 0) {
+            writer.print("Arguments:\n", .{}) catch {};
+            for(self.discoveredParams.slice()) |param| {
+                var help = param.help;
+
+                // padding
+                writer.print("  ", .{}) catch {};
+                if(param.short) |key| {
+                    writer.print("{s}", .{key}) catch {};
+                }
+                if(param.short != null and param.long != null) {
+                    writer.print(",", .{}) catch {};
+                }
+                if(param.long) |key| {
+                    writer.print("{s}", .{key}) catch {};
+                }      
+
+                writer.print("\t{s}\n", .{help}) catch {};
+            }
         }
     }
 
-    fn subcommand(self: *const Self, args: ArgList, comptime command: []const u8) ?ArgList {
-        _ = self;
+    fn subcommand(self: *Self, args: ArgList, comptime command: []const u8, comptime help: []const u8) ?ArgList {
+        self.discoveredSubcommands.append(.{
+            .name = command,
+            .help = help,
+        }) catch {};
+
         // Return the tail-slice after the subcommand-arg, if found. Otherwise null.
         return for(args) |arg, i| {
             if(std.mem.indexOf(u8, arg, command) != null) {
@@ -247,13 +273,10 @@ test "argparse shall provide argument values" {
     var argparse = Argparse.init("My app", "v1.0-test");
 
     try testing.expectEqualStrings(argparse.optionalParam(args, "--key", null, "Some key, out there").?, "value");
-
-    // debug
-    argparse.showHelp(std.io.getStdErr().writer());
 }
 
 test "subcommand" {
-    var argparse = Argparse.init("Waxels", "0.0.1-testbuild");
+    var argparse = Argparse.init("My app", "1.0");
 
     // --all is a subcommand-specific flag, and should not be "picked up" by the global flag extraction
     var args = &.{"-v", "update","--all", "--input=file"};
@@ -265,7 +288,7 @@ test "subcommand" {
     try testing.expect(!argparse.optionalFlag(args, "--all", null, ""));
     try testing.expect(argparse.optionalParam(args, "--input", null, "") == null);
 
-    var maybe_sc_update_args = argparse.subcommand(args, "update");
+    var maybe_sc_update_args = argparse.subcommand(args, "update", "help-text");
     try testing.expect(maybe_sc_update_args != null);
 
     var sc_update_args = maybe_sc_update_args.?;
@@ -276,11 +299,32 @@ test "subcommand" {
     // try testing.expectEqualStrings("update", sc_update.)
     // Every arg-check now belongs to the subcommand?
     // TODO: Att! The main help needs to list all subcommands
+}
 
+test "subcommand shall show up in help" {
+    var argparse = Argparse.init("My app", "1.0");
+    var args = &.{"--help"};
+
+    argparse.checkHelp(args);
+
+    _ = argparse.subcommand(args, "init", "help-text");
+    _ = argparse.subcommand(args, "update", "help-text");
+
+    var outputbuffer = std.ArrayList(u8).init(std.testing.allocator);
+    defer outputbuffer.deinit();
+
+    _ = argparse.conclude(outputbuffer.writer());
+
+    try expectStringContains(outputbuffer.items, "init");
+    try expectStringContains(outputbuffer.items, "update");
+
+
+    // debug
+    argparse.showHelp(std.io.getStdErr().writer());
 }
 
 // test "full waxels inputset" {
-//     var argparse = Argparse.init("Waxels", "0.0.1-testbuild");
+//     var argparse = Argparse.init("My app", "1.0");
 //     defer {
 //         if(!argparse.conclude()) {
 //             std.process.exit(1);
