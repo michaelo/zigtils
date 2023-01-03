@@ -19,6 +19,9 @@
 // Background for strategy:
 // No-assumption to ideal structures for parsed arguments, and how they are used in the application, thus leaving it to the developer/argparse-user do programatically explicitly tie CLI to app-entry
 // 
+// Custom argument parser rules:
+//   Shall have a return error set of ParseError
+//   
 
 const std = @import("std");
 const testing = std.testing;
@@ -26,7 +29,8 @@ const mtest = @import("mtest.zig");
 const print = std.debug.print;
 
 const ParseError = error {
-    InvalidFormat
+    NotFound,
+    InvalidFormat,
 };
 
 const ArgList = []const []const u8;
@@ -46,7 +50,7 @@ const SubcommandEntry = struct {
 
 pub inline fn parseInt(val: []const u8) ParseError!usize {
     return std.fmt.parseInt(usize, val, 10) catch {
-        return .InvalidFormat;
+        return ParseError.InvalidFormat;
     };
 }
 
@@ -83,7 +87,7 @@ const Argparse = struct {
     }
 
     // Looks for argument of any type and returns index into arglist
-    fn findAndRegisterFlagOrParameter(
+    fn findAndRegisterArgument(
             self: *Self,
             args: ArgList,
             comptime long: ?[]const u8,
@@ -147,17 +151,17 @@ const Argparse = struct {
 
     // Integrated help-check
     fn checkHelp(self: *Self, args: ArgList) void {
-        self.gotHelp = self.findAndRegisterFlagOrParameter(args, "--help", "-h", "Prints help", .Flag, false, .Global) != null;
+        self.gotHelp = self.findAndRegisterArgument(args, "--help", "-h", "Prints help", .Flag, false, .Global) != null;
     }
 
     // Returns true/false wether or not a given flag is encountered
     fn optionalFlag(self: *Self, args: ArgList, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) bool {
         // TODO: verify no dupes
-        return self.findAndRegisterFlagOrParameter(args, long, short, help, .Flag, false, .UntilSubcommand) != null;
+        return self.findAndRegisterArgument(args, long, short, help, .Flag, false, .UntilSubcommand) != null;
     }
 
     fn optionalParam(self: *Self, args: ArgList, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) ?[]const u8 {
-        var maybe_idx = self.findAndRegisterFlagOrParameter(args, long, short, help, .Param, false, .UntilSubcommand);
+        var maybe_idx = self.findAndRegisterArgument(args, long, short, help, .Param, false, .UntilSubcommand);
 
         if(maybe_idx) |idx| {
             // Extract value
@@ -269,7 +273,51 @@ const Argparse = struct {
 
         return allOk;
     }
+
+    fn paramCustom(self: *Self,
+            comptime parseFunc: anytype,
+            args: ArgList,
+            comptime long: ?[]const u8,
+            comptime short: ?[]const u8,
+            help: []const u8) returnTypeOf(parseFunc) {
+        var maybe_idx = self.findAndRegisterArgument(args, long, short, help, .Param, false, .UntilSubcommand);
+
+        if(maybe_idx) |idx| {
+            // Extract value
+            var field = args[idx];
+            if(std.mem.indexOf(u8, field, "=")) |eql| {
+                var value = field[eql+1..];
+                if(value.len > 0) {
+                    // TODO: we can provide certain error handling here, depending on if argument is requierd or not. And if argument-type is an enum, we can provide a descriptive error of valid values too.
+                    return try parseFunc(value);
+                } else {
+                    self.errors.append("Expected value for param: " ++ (long orelse short)) catch {};
+                }
+            }
+        }
+
+        return ParseError.NotFound;
+    }
 };
+
+fn returnTypeOf(comptime func: anytype) type {
+    const typeInfo = @typeInfo(@TypeOf(func));
+    if(typeInfo != .Fn) @compileError("Argument must be a function");
+
+    const returnType = typeInfo.Fn.return_type.?;
+    // TODO:
+    // Create a type, based off of returnType:
+    // const newType = std.builtin.Type {
+    //     .Optional = .{
+    //         .child = returnType,
+    //     }
+    // };
+    // _ = newType;
+    // Problem: Returning this makes the compiler complain that std.builtin.Type != type
+    // Using @TypeOf() makes the compiler complain that it can't resolve at comptime
+    // return newType;
+    return returnType;
+}
 
 test "argparse with no args is OK" {
     var outputbuffer = std.ArrayList(u8).init(std.testing.allocator);
@@ -390,9 +438,83 @@ test "subcommand --help shall show subcommand-specific help/params" {
     try mtest.expectStringContains(outputbuffer.items, "init");
     try mtest.expectStringNotContains(outputbuffer.items, "update");
 
-    // debug
-    argparse.showHelp(std.io.getStdErr().writer());
+    // // debug
+    // argparse.showHelp(std.io.getStdErr().writer());
 }
+
+const TestEnumval = enum {
+    ValA,
+    ValB
+};
+
+const TestParsers = struct {
+    fn parseTestEnumval(raw: []const u8) ParseError!TestEnumval {
+        return std.meta.stringToEnum(TestEnumval, raw) orelse ParseError.InvalidFormat;
+    }
+};
+
+test "argparse shall provide functionality to parse parameter values to arbitrary types" {
+    var argparse = Argparse.init("My app", "1.0");
+    var args = &.{"--intval=123", "--strval=hei", "--enumval=ValB"};
+
+
+    try testing.expectEqual(@as(usize, 123), try argparse.paramCustom(parseInt, args, "--intval", null, ""));
+    try testing.expectEqualStrings("hei", try argparse.paramCustom(parseString, args, "--strval", null, ""));
+    // TODO: "Unable to resolve comptime value" - but identical code works from main()
+    // try testing.expectEqual(.ValB, try argparse.paramCustom(TestParsers.parseTestEnumval, args, "--enumval", null, ""));
+}
+
+test "argparse parseCustom shall support default values" {
+    var argparse = Argparse.init("My app", "1.0");
+    var args = &.{};
+
+    var value = argparse.paramCustom(
+        parseInt,
+        args,
+        "--intval", null, "",
+        42, // nullable
+        false // TBD: Can we change return type to nullable if required=false and no defaults provided?
+        );
+
+    try testing.expectEqual(@as(usize, 42), value);
+}
+
+test "expl" {
+    print("type: {any}\n", .{@typeInfo(@typeInfo(fn()usize).Fn.return_type.?)});
+    print("type: {any}\n", .{@typeInfo(@typeInfo(fn()?usize).Fn.return_type.?)});
+}
+
+pub fn main() !void {
+    // Setup
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const args_raw = try std.process.argsAlloc(aa);
+    defer std.process.argsFree(aa, args_raw);
+
+    var args = args_raw[1..];
+
+    // Test
+    var argparse = Argparse.init("My app", "1.0");
+    argparse.checkHelp(args);
+
+    var intval = argparse.paramCustom(parseInt, args, "--intval", null, "Expects an integer value") catch 42;
+    var strval = argparse.paramCustom(parseString, args, "--strval", null, "Expects a string") catch "OK";
+    var enumval = argparse.paramCustom(TestParsers.parseTestEnumval, args, "--enumval", null, "Expects ValA or ValB") catch .ValA;
+
+    print("args: {s}\n", .{args[1..]});
+    print("got: {d} {s} {s}\n", .{intval, strval, @tagName(enumval)});
+    
+    if(!argparse.conclude(std.io.getStdErr().writer())) {
+        std.process.exit(1);
+    }
+}
+
+// test "argparse shall support enums values for arguments" {
+    
+// }
 
 // test "full waxels inputset" {
 //     var argparse = Argparse.init("My app", "1.0");
