@@ -534,9 +534,30 @@ test "argparse paramCustom shall support default values" {
     try testing.expect(nullvalue == null);
 }
 
+// Generates a comma-separated list of all enum-values
+fn enumValues(comptime enumType: type) []const u8 {
+    return comptime blk: {
+        const typeInfo = @typeInfo(enumType).Enum;
+        var result = std.BoundedArray(u8, 1024).init(0) catch unreachable;
+        for(typeInfo.fields) |field| {
+            result.writer().print("{s},", .{field.name}) catch @compileError("To many choices for enum");
+        }
+        break :blk result.slice()[0..result.slice().len-1];
+    };
+}
+
+test "enumValues" {
+    const MyEnum = enum {
+        ValueA,
+        ValueB
+    };
+    try testing.expectEqualStrings("ValueA,ValueB", enumValues(MyEnum));
+}
+
 test "expl" {
-    print("type: {any}\n", .{@typeInfo(@typeInfo(fn()usize).Fn.return_type.?)});
-    print("type: {any}\n", .{@typeInfo(@typeInfo(fn()?usize).Fn.return_type.?)});
+    const values = enumValues(TestEnumval);
+
+    print("result: {s}\n", .{values});
 }
 
 pub fn main() !void {
