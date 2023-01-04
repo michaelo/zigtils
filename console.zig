@@ -4,6 +4,7 @@ pub const Color = std.debug.TTY.Color;
 /// Basic output-wrapper with console-escape-codes for supported platforms.
 /// Convenience-oriented with regards to enabling different levels of output
 /// API: <stream>Print(), <stream>Colored(), with <stream> being std, debug, error or verbose.
+/// Actively suppresses write-related errors to ensure unintrusive usage.
 pub const Console = struct {
     const Self = @This();
 
@@ -51,7 +52,7 @@ pub const Console = struct {
             .std_writer = writer,
             .error_writer = writer,
             .verbose_writer = writer,
-            .ttyconf = std.debug.detectTTYConfig(),
+            .ttyconf = std.debug.detectTTYConfig(std.io.getStdErr()),
         };
     }
 
@@ -59,7 +60,7 @@ pub const Console = struct {
         return switch(value) {
             .on => .escape_codes,
             .off => .no_color,
-            .auto => std.debug.detectTTYConfig()
+            .auto => std.debug.detectTTYConfig(std.io.getStdErr())
         };
     }
 
@@ -68,11 +69,11 @@ pub const Console = struct {
         if(maybe_writer == null) return;
         const writer = maybe_writer.?;
         if(maybe_color) |color| {
-           self.ttyconf.setColor(writer, color);
+           self.ttyconf.setColor(writer, color) catch {};
         }
         writer.print(fmt, args) catch {};
         if(maybe_color != null) {
-           self.ttyconf.setColor(writer, .Reset);
+           self.ttyconf.setColor(writer, .Reset) catch {};
         }
     }
 
