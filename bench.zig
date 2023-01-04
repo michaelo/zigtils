@@ -1,7 +1,8 @@
 const std = @import("std");
 const print = std.debug.print;
 
-pub fn bench(comptime func: anytype, params: struct {
+// Simple benchmarking of function - including any arguments. Writes to stderr.
+pub fn bench(comptime func: anytype, comptime func_args: anytype, params: struct {
     warmup_iterations: usize = 0, num_iterations: usize = 10
 }) !void {
     const NS_PR_MS = 1000_000;
@@ -9,17 +10,17 @@ pub fn bench(comptime func: anytype, params: struct {
     print("Starting benchmark\n", .{});
     print("  warmup: {}\n", .{params.warmup_iterations});
     print("  iterations: {}\n", .{params.num_iterations});
-    const func_return_type = @typeInfo(@typeInfo(@TypeOf(func)).Fn.return_type.?);
+    const func_typeinfo = @typeInfo(@TypeOf(func));
+    if(func_typeinfo != .Fn) @compileError("argument 'func' must be a function. Got '" ++ @tagName(func_typeinfo) ++ "'");
+    const func_return_type = func_typeinfo.Fn.return_type.?;
 
+    var result: func_return_type = undefined;
 
     // Warmup
     var i:usize = 0;
+
     while(i < params.warmup_iterations): (i += 1) {
-        if(func_return_type == .ErrorUnion) {
-            try func();
-        } else {
-            func();
-        }
+        result = @call(.auto, func, func_args);
     }
 
     // Stats variables
@@ -31,11 +32,7 @@ pub fn bench(comptime func: anytype, params: struct {
     i = 0;
     var timer = try std.time.Timer.start();
     while(i < params.num_iterations): (i += 1) {
-        if(func_return_type == .ErrorUnion) {
-            try func();
-        } else {
-            func();
-        }
+        result = @call(.auto, func, func_args);
 
         const delta_ns = timer.lap();
         if (delta_ns > max_time_ns) max_time_ns = delta_ns;
@@ -52,5 +49,42 @@ pub fn bench(comptime func: anytype, params: struct {
         @intToFloat(f64, total_time_ns) / NS_PR_MS, // total ms
         total_time_ns}); // total ns
 
+    // Print the output of the benched function - if any
+    const maybe_result_format: ?[]const u8 = switch(@TypeOf(result)) {
+        void => null,
+        []const u8 => "{s}",
+        else => "{any}"
+    };
+
+    if(maybe_result_format) |format| {
+        print("  function output: " ++ format ++ "\n", .{result});
+    }
+
     print("Finished benchmark\n", .{});
+}
+
+test "bench" {
+    const Func = struct {
+        fn func(intval: usize) void {
+            print("DEBUG: intval: {d}\n", .{intval});
+        }
+
+        fn add(a: usize, b: usize) usize {
+            return a+b;
+        }
+
+        fn hello() []const u8 {
+            return "world";
+        }
+
+        fn maybe_error() !usize {
+            return error.Woops;
+        }
+    };
+
+    try bench(Func.func, .{21}, .{});
+    try bench(Func.add, .{21, 84}, .{});
+    try bench(Func.hello, .{}, .{});
+    try bench(Func.maybe_error, .{}, .{});
+    // try bench(123, .{}, .{}); // Won't compile as the first argument isn't a function
 }
