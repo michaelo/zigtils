@@ -5,6 +5,7 @@ pub const Color = std.debug.TTY.Color;
 /// Convenience-oriented with regards to enabling different levels of output
 /// API: <stream>Print(), <stream>Colored(), with <stream> being std, debug, error or verbose.
 /// Actively suppresses write-related errors to ensure unintrusive usage.
+/// TODO: at init overload functions to remove the recurring nullchecks?
 pub const Console = struct {
     const Self = @This();
 
