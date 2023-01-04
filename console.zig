@@ -101,7 +101,7 @@ pub const Console = struct {
         self.out(self.error_writer, color, fmt, args);        
     }
 
-    // TBD: What's the use case for "debug"?
+    // TBD: What's the use case for "debug" vs "verbose"?
     pub fn debugPrint(self: *const Self, comptime fmt:[]const u8, args: anytype) void {
         self.out(self.debug_writer, null, fmt, args);
     }
