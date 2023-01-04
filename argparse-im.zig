@@ -71,18 +71,15 @@ const Argparse = struct {
     
     // TODO: Make either dynamic, or comptime parameters for init()
     errors: std.BoundedArray([]const u8, 32),
-    discoveredParams: std.BoundedArray(Entry, 128),
-    discoveredSubcommands: std.BoundedArray(SubcommandEntry, 128),
-    discoveredSubcommandParams: std.BoundedArray(Entry, 128),
+    discoveredParams: std.BoundedArray(Entry, 128) = std.BoundedArray(Entry, 128).init(0) catch unreachable,
+    discoveredSubcommands: std.BoundedArray(SubcommandEntry, 128) = std.BoundedArray(SubcommandEntry, 128).init(0) catch unreachable,
+    discoveredSubcommandParams: std.BoundedArray(Entry, 128) = std.BoundedArray(Entry, 128).init(0) catch unreachable,
 
     fn init(name: []const u8, versionTag: []const u8) Self {
         return Self{
             .name = name,
             .versionTag = versionTag,
             .errors = std.BoundedArray([]const u8, 32).init(0) catch unreachable,
-            .discoveredParams = std.BoundedArray(Entry, 128).init(0) catch unreachable,
-            .discoveredSubcommands = std.BoundedArray(SubcommandEntry, 128).init(0) catch unreachable,
-            .discoveredSubcommandParams = std.BoundedArray(Entry, 128).init(0) catch unreachable
         };
     }
 
@@ -156,7 +153,6 @@ const Argparse = struct {
 
     // Returns true/false wether or not a given flag is encountered
     fn optionalFlag(self: *Self, args: ArgList, comptime long: ?[]const u8, comptime short: ?[]const u8, help: []const u8) bool {
-        // TODO: verify no dupes
         return self.findAndRegisterArgument(args, long, short, help, .Flag, false, .UntilSubcommand) != null;
     }
 
@@ -280,9 +276,11 @@ const Argparse = struct {
             comptime long: ?[]const u8,
             comptime short: ?[]const u8,
             help: []const u8,
-            comptime required: bool,
-            comptime maybe_default: ?coreTypeOf(returnTypeOf(parseFunc)),
-            ) ParseError!maybeOptional(maybe_default==null, coreTypeOf(returnTypeOf(parseFunc))) {
+            comptime options : struct {
+                required: bool = true,
+                default: ?coreTypeOf(returnTypeOf(parseFunc)) = null,
+            }
+            ) ParseError!maybeOptional(options.required == false and options.default==null, coreTypeOf(returnTypeOf(parseFunc))) {
         var maybe_idx = self.findAndRegisterArgument(args, long, short, help, .Param, false, .UntilSubcommand);
 
         if(maybe_idx) |idx| {
@@ -291,16 +289,19 @@ const Argparse = struct {
             if(std.mem.indexOf(u8, field, "=")) |eql| {
                 var value = field[eql+1..];
                 // TODO: we can provide certain error handling here, depending on if argument is requierd or not. And if argument-type is an enum, we can provide a descriptive error of valid values too.
-                return try parseFunc(value);
+                return parseFunc(value) catch |err| {
+                    self.errors.append("Could not parse value for param: " ++ (long orelse short) ++ ". Expected: <TODO>") catch {};
+                    return err;
+                };
             }
         }
 
-        if(required) {
+        if(options.required) {
             self.errors.append("Expected required param: " ++ (long orelse short)) catch {};
             return ParseError.NotFound;
         } else {
-            if(maybe_default) |default| {
-                return default;
+            if(options.default) |value| {
+                return value;
             } else {
                 return null;
             }
@@ -497,33 +498,38 @@ test "argparse shall provide functionality to parse parameter values to arbitrar
     var args = &.{"--intval=123", "--strval=hei", "--enumval=ValB"};
 
 
-    try testing.expectEqual(@as(usize, 123), try argparse.paramCustom(parseInt, args, "--intval", null, ""));
-    try testing.expectEqualStrings("hei", try argparse.paramCustom(parseString, args, "--strval", null, ""));
+    try testing.expectEqual(@as(usize, 123), try argparse.paramCustom(parseInt, args, "--intval", null, "", .{}));
+    try testing.expectEqualStrings("hei", try argparse.paramCustom(parseString, args, "--strval", null, "", .{}));
     // TODO: "Unable to resolve comptime value" - but identical code works from main()
     // try testing.expectEqual(.ValB, try argparse.paramCustom(TestParsers.parseTestEnumval, args, "--enumval", null, ""));
 }
 
-test "argparse parseCustom shall support default values" {
+test "argparse paramCustom shall support default values" {
     var argparse = Argparse.init("My app", "1.0");
     var args = &.{};
 
+    // Testing usize as default
     var value = try argparse.paramCustom(
         parseInt,
         args,
         "--intval", null, "",
-        false, // TBD: Can we change return type to nullable if required=false and no defaults provided?
-        42, // nullable
+        .{
+            .required = false, // TBD: Can we change return type to nullable if required=false and no defaults provided?
+            .default = 42, // nullable
+        }
         );
 
     try testing.expectEqual(@as(usize, 42), value);
 
-
+    // Testing null as default
     var nullvalue = try argparse.paramCustom(
         parseInt,
         args,
         "--intval", null, "",
-        false, // TBD: Can we change return type to nullable if required=false and no defaults provided?
-        null, // nullable
+        .{
+            .required = false,
+            .default = null,
+        }
         );
     try testing.expect(nullvalue == null);
 }
@@ -549,9 +555,12 @@ pub fn main() !void {
     var argparse = Argparse.init("My app", "1.0");
     argparse.checkHelp(args);
 
-    var intval = argparse.paramCustom(parseInt, args, "--intval", null, "Expects an integer value") catch 42;
-    var strval = argparse.paramCustom(parseString, args, "--strval", null, "Expects a string") catch "OK";
-    var enumval = argparse.paramCustom(TestParsers.parseTestEnumval, args, "--enumval", null, "Expects ValA or ValB") catch .ValA;
+    // TODO: How do we most elegantly allof for the entire "spec" to be defined, while ensure the resulting values are convenient to use?
+    //       Scenario: We want the help to be able to print the entire argument-set, regardless of any params have feiled
+    //                 Is this were we need to reconsider the intermediate-style?
+    var intval = try argparse.paramCustom(parseInt, args, "--intval", null, "Expects an integer value", .{.required=false, .default=42});
+    var strval = try argparse.paramCustom(parseString, args, "--strval", null, "Expects a string", .{.required=false, .default="OK"});
+    var enumval = try argparse.paramCustom(TestParsers.parseTestEnumval, args, "--enumval", null, "Expects ValA or ValB", .{.required=false, .default=.ValA});
 
     print("args: {s}\n", .{args[1..]});
     print("got: {d} {s} {s}\n", .{intval, strval, @tagName(enumval)});
