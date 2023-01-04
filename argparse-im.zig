@@ -279,7 +279,10 @@ const Argparse = struct {
             args: ArgList,
             comptime long: ?[]const u8,
             comptime short: ?[]const u8,
-            help: []const u8) returnTypeOf(parseFunc) {
+            help: []const u8,
+            comptime required: bool,
+            comptime maybe_default: ?coreTypeOf(returnTypeOf(parseFunc)),
+            ) ParseError!maybeOptional(maybe_default==null, coreTypeOf(returnTypeOf(parseFunc))) {
         var maybe_idx = self.findAndRegisterArgument(args, long, short, help, .Param, false, .UntilSubcommand);
 
         if(maybe_idx) |idx| {
@@ -287,18 +290,31 @@ const Argparse = struct {
             var field = args[idx];
             if(std.mem.indexOf(u8, field, "=")) |eql| {
                 var value = field[eql+1..];
-                if(value.len > 0) {
-                    // TODO: we can provide certain error handling here, depending on if argument is requierd or not. And if argument-type is an enum, we can provide a descriptive error of valid values too.
-                    return try parseFunc(value);
-                } else {
-                    self.errors.append("Expected value for param: " ++ (long orelse short)) catch {};
-                }
+                // TODO: we can provide certain error handling here, depending on if argument is requierd or not. And if argument-type is an enum, we can provide a descriptive error of valid values too.
+                return try parseFunc(value);
             }
         }
 
-        return ParseError.NotFound;
+        if(required) {
+            self.errors.append("Expected required param: " ++ (long orelse short)) catch {};
+            return ParseError.NotFound;
+        } else {
+            if(maybe_default) |default| {
+                return default;
+            } else {
+                return null;
+            }
+        }
     }
 };
+
+fn maybeOptional(comptime is_optional: bool, comptime return_type: type) type {
+    if(is_optional) {
+        return ?return_type;
+    } else {
+        return return_type;
+    }
+}
 
 fn returnTypeOf(comptime func: anytype) type {
     const typeInfo = @typeInfo(@TypeOf(func));
@@ -317,6 +333,29 @@ fn returnTypeOf(comptime func: anytype) type {
     // Using @TypeOf() makes the compiler complain that it can't resolve at comptime
     // return newType;
     return returnType;
+}
+
+// Extract the actual data type, even given error unions or optionals
+fn coreTypeOf(comptime typevalue: type) type {
+    var typeInfo = @typeInfo(typevalue);
+    var coreType = switch(typeInfo) {
+        .ErrorUnion => |v| v.payload, // What if error+optional?
+        .Optional => |v| v.child,
+        else => typevalue
+    };
+
+    typeInfo = @typeInfo(typevalue);
+    if(typeInfo == .ErrorUnion or typeInfo == .Optional)
+        return coreTypeOf(coreType);
+
+    return coreType;
+}
+
+test "coreTypeOf" {
+    try testing.expect(coreTypeOf(usize) == usize);
+    try testing.expect(coreTypeOf(?usize) == usize);
+    try testing.expect(coreTypeOf(ParseError!usize) == usize);
+    try testing.expect(coreTypeOf(ParseError!?usize) == usize);
 }
 
 test "argparse with no args is OK" {
@@ -468,15 +507,25 @@ test "argparse parseCustom shall support default values" {
     var argparse = Argparse.init("My app", "1.0");
     var args = &.{};
 
-    var value = argparse.paramCustom(
+    var value = try argparse.paramCustom(
         parseInt,
         args,
         "--intval", null, "",
+        false, // TBD: Can we change return type to nullable if required=false and no defaults provided?
         42, // nullable
-        false // TBD: Can we change return type to nullable if required=false and no defaults provided?
         );
 
     try testing.expectEqual(@as(usize, 42), value);
+
+
+    var nullvalue = try argparse.paramCustom(
+        parseInt,
+        args,
+        "--intval", null, "",
+        false, // TBD: Can we change return type to nullable if required=false and no defaults provided?
+        null, // nullable
+        );
+    try testing.expect(nullvalue == null);
 }
 
 test "expl" {
