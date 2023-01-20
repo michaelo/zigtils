@@ -1,3 +1,4 @@
+// STATUS: FUNCTIONING
 const std = @import("std");
 pub const Color = std.debug.TTY.Color;
 

@@ -1,7 +1,8 @@
+// STATUS: FUNCTIONING
+// Simple benchmarking of function - including any arguments. Writes to stderr.
 const std = @import("std");
 const print = std.debug.print;
 
-// Simple benchmarking of function - including any arguments. Writes to stderr.
 pub fn bench(comptime func: anytype, comptime func_args: anytype, params: struct {
     warmup_iterations: usize = 0, num_iterations: usize = 10
 }) !void {
