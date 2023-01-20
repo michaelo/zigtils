@@ -1,3 +1,5 @@
+// STATUS: Unfinished / not usable
+
 // "immediate mode"-argparse exploration
 // Currently requiring arguments to be comptile time known
 // Rules/features:
