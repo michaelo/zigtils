@@ -1,3 +1,4 @@
+// STATUS: Work in progress, not functioning
 const std = @import("std");
 const testing = std.testing;
 const print = std.debug.print;
@@ -7,9 +8,34 @@ const Subcommand = enum { init, update };
 
 const string = []const u8;
 
-pub fn Argparse(comptime result_type: type, comptime name: []const u8, comptime tag: []const u8, comptime config: struct { default_required: bool = true, subcommand_enum: ?type = null }) type {
-    _ = name;
-    _ = tag;
+// TODO: How can I store the different type-parsers? By the -im approach with comptime handled functions this didn't require any storage. But for this approach this must be solved.
+//       Can we create an indexable register/lookup? Or pass in generator-functions with a known interface that returns the proper parsers?
+const Entry = struct {
+    result_type: type,
+    parser: ?fn(string)ParseError!@This().result_type,
+    long: ?[]const u8,
+    short: ?[]const u8,
+    help: []const u8,
+};
+
+test "Entry" {
+    var entry = Entry{
+        .result_type = string,
+        .parser = parseString,
+        .long = "--key",
+        .short = "-k",
+        .help = "..."
+    };
+
+    try testing.expectEqualStrings("value", try entry.parser("value"));
+}
+
+test "parser list" {
+    
+}
+
+pub fn Argparse(comptime result_type: type, comptime title: []const u8, comptime config: struct { default_required: bool = true, subcommand_enum: ?type = null }) type {
+    _ = title;
 
     return struct {
         alloc: std.mem.Allocator,
@@ -97,6 +123,21 @@ pub fn Argparse(comptime result_type: type, comptime name: []const u8, comptime 
     };
 }
 
+test "argparse shall parse flag and set corresponding field to true if found, otherwise false" {
+    const Type = struct { myflag: bool };
+    var parser = Argparse(Type, "app", .{}).init(testing.allocator);
+    parser.flag("--myflag", "-m", "...");
+    var result1 = try parser.conclude(&.{"--myflag"});
+    var result2 = try parser.conclude(&.{"--f"});
+    var result3 = try parser.conclude(&.{});
+
+    try testing.expect(result1.myflag);
+    try testing.expect(result2.myflag);
+    try testing.expect(!result3.myflag);
+}
+
+
+
 fn maybeOptional(comptime is_optional: bool, comptime return_type: type) type {
     if (is_optional) {
         return ?return_type;
@@ -132,7 +173,7 @@ const Result = struct {
     logsev: Severity,
 
     // "Automagic" name?
-    subcommand: ?union(Subcommand) { init: struct {
+    subcommand: union(Subcommand) { init: struct {
         force: bool,
         file: []const u8,
     }, update: struct { force: bool } },
@@ -162,7 +203,7 @@ pub inline fn parseString(val: []const u8) ParseError![]const u8 {
 }
 
 test "exploration" {
-    var argparse = Argparse(Result, "MyApp", "v1.0.0", .{ .default_required = false, .subcommand_enum = Subcommand })
+    var argparse = Argparse(Result, "MyApp v1.0.0", .{ .default_required = false, .subcommand_enum = Subcommand })
         .init(testing.allocator);
     defer argparse.deinit();
 
@@ -180,8 +221,8 @@ test "exploration" {
     sc_update.flag("--force", "-f", "Never stop updating");
 
     // Upon errors; print errors + help, then abort
-    var result: Result = undefined;
-    try argparse.conclude(&result, &.{ "init", "--file=some.txt" });
+    var result: Result = try argparse.conclude(&.{ "init", "--file=some.txt" });
+    _ = result;
 }
 
 test "typeplay" {

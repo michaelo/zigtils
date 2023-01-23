@@ -617,3 +617,9 @@ pub fn main() !void {
 // notes
 //   - subcommand() can return a slice with only the subcommand-specific arguments
 //   - get arg can take argument re type to convert to (or a converter-function)
+
+
+// Revised strategy:
+// If an argument read fails, that's OK
+// If --help is detected; can we somehow bypass/ignore the actual parsings? Except for eventual subcommands... How to solve, while still be reasonably type safe?
+// ...
