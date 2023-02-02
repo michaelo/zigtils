@@ -2,6 +2,36 @@ const std = @import("std");
 const testing = std.testing;
 const print = std.debug.print;
 
+const ParseError = error{
+    NotFound,
+    InvalidFormat,
+};
+
+// Extract the actual data type, even given error unions or optionals
+fn coreTypeOf(comptime typevalue: type) type {
+    var typeInfo = @typeInfo(typevalue);
+    var coreType = switch (typeInfo) {
+        .ErrorUnion => |v| v.payload, // What if error+optional?
+        .Optional => |v| v.child,
+        else => typevalue,
+    };
+
+    typeInfo = @typeInfo(typevalue);
+    if (typeInfo == .ErrorUnion or typeInfo == .Optional)
+        return coreTypeOf(coreType);
+
+    return coreType;
+}
+
+fn returnTypeOf(comptime func: anytype) type {
+    const typeInfo = @typeInfo(@TypeOf(func));
+    if (typeInfo != .Fn) @compileError("Argument must be a function");
+    return typeInfo.Fn.return_type.?;
+}
+
+// Creates a parser supertype, which will be derived into field/type-specific parsers using .createFieldParser
+// This allows us to register a set of parsers, regardless of their return-types and allows us (hopefully) type-safe
+// argument parsing later on.
 pub fn ParserForResultType(comptime ResultT: type) type {
     return struct {
         const Self = @This();
@@ -10,32 +40,45 @@ pub fn ParserForResultType(comptime ResultT: type) type {
 
         pub fn Methods(comptime T: type) type {
             return extern struct {
-                pub inline fn parse(self: *const T, raw: []const u8, result: *ResultT) void {
-                    self.__v.parse(@ptrCast(*const ParserForResultType(ResultT), self), raw, result);
+                pub inline fn parse(self: *const T, raw: []const u8, result: *ResultT) ParseError!void {
+                    try self.__v.parse(@ptrCast(*const ParserForResultType(ResultT), self), raw, result);
                 }
-                // pub inline fn fieldName(self: *const T) comptime []const u8 {
-
-                // }
             };
         }
 
         pub const VTable = extern struct {
-            parse: *const fn(self: *const ParserForResultType(ResultT), []const u8, *ResultT) void,
+            parse: *const fn(self: *const ParserForResultType(ResultT), []const u8, *ResultT) ParseError!void,
         };
 
-        pub fn createParserType(comptime dataType: type, comptime field: []const u8, comptime funcImpl: fn ([]const u8) dataType) type {
+        pub fn createFieldParser(comptime field: []const u8, comptime funcImpl: anytype) type {
+            // Assert valid type-combo
+            comptime {
+                // Find field with corresponding name:
+                var structField = blk: inline for (@typeInfo(ResultT).Struct.fields) |f| {
+                    if(std.mem.eql(u8, field, f.name)) {
+                        break :blk f;
+                    }
+                } else {
+                    @compileError("no such field: " ++ field);
+                };
+
+                // Verify type-equality
+                const coreTypeOfFunc = coreTypeOf(returnTypeOf(funcImpl));
+                if(structField.type != coreTypeOfFunc) {
+                    @compileError("Incompatible types: " ++ @typeName(structField.type) ++ " vs " ++ coreTypeOfFunc);
+                }
+            }
             return struct {
                 usingnamespace Self.Methods(@This());
                 __v: *const Self.VTable = &vtable,
 
                 const vtable = Self.VTable {
-                    .parse = actualParse,
+                    .parse = parseImpl,
                 };
 
-                // Make this the .parse of .VTable
-                pub fn actualParse(iself: *const ParserForResultType(ResultT), raw: []const u8, result: *ResultT) void {
+                pub fn parseImpl(iself: *const ParserForResultType(ResultT), raw: []const u8, result: *ResultT) ParseError!void {
                     _ = @ptrCast(*const @This(), iself);
-                    @field(result, field) = funcImpl(raw);
+                    @field(result, field) = try funcImpl(raw);
                 }
             };
         }
@@ -45,17 +88,14 @@ pub fn ParserForResultType(comptime ResultT: type) type {
 
 const Result = struct { a: usize, b: []const u8 };
 
-fn intParseImpl(raw: []const u8) usize {
-    _ = raw;
-    // _ = result;
-    print("intparse!\n", .{});
-    return 321;
+pub inline fn parseInt(val: []const u8) ParseError!usize {
+    return std.fmt.parseInt(usize, val, 10) catch {
+        return ParseError.InvalidFormat;
+    };
 }
 
-fn stringParseImpl(raw: []const u8) []const u8 {
-    _ = raw;
-    print("stringparse!\n", .{});
-    return "321";
+pub inline fn parseString(val: []const u8) ParseError![]const u8 {
+    return val;
 }
 
 test "2dyn" {
@@ -63,8 +103,8 @@ test "2dyn" {
 
     const Parser = ParserForResultType(Result);
 
-    var intparser = Parser.createParserType(usize, "a", intParseImpl){};
-    var stringparser = Parser.createParserType([]const u8, "b", stringParseImpl){};
+    var intparser = Parser.createFieldParser("a", parseInt){};
+    var stringparser = Parser.createFieldParser("b", parseString){};
 
     
     var list = std.ArrayList(*Parser).init(allocator);
@@ -76,7 +116,7 @@ test "2dyn" {
 
     var result: Result = undefined;
     for (list.items) |entry| {
-        entry.parse("321", &result);
+        try entry.parse("321", &result);
     }
 
     try testing.expect(result.a == 321);
@@ -86,4 +126,5 @@ test "2dyn" {
 }
 
 // Plan:
-// If all good: Implement error-handling
+// Incorporate this into argparse, which will handle allocations, and final evaluations
+// ... including verifications that all fields are configured at time of .conclude()
