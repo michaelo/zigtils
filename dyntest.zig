@@ -50,6 +50,7 @@ pub fn ParserForResultType(comptime ResultT: type) type {
             parse: *const fn(self: *const ParserForResultType(ResultT), []const u8, *ResultT) ParseError!void,
         };
 
+        // Creates a concrete parser for a particular field
         pub fn createFieldParser(comptime field: []const u8, comptime funcImpl: anytype) type {
             // Assert valid type-combo
             comptime {
@@ -68,6 +69,8 @@ pub fn ParserForResultType(comptime ResultT: type) type {
                     @compileError("Incompatible types: " ++ @typeName(structField.type) ++ " vs " ++ coreTypeOfFunc);
                 }
             }
+
+            // Return the subtype
             return struct {
                 usingnamespace Self.Methods(@This());
                 __v: *const Self.VTable = &vtable,
@@ -123,6 +126,53 @@ test "2dyn" {
     try testing.expectEqualStrings("321", result.b);
 
     // Can I store them in a map, dynamically look up and utilize to populate a struct?
+}
+
+fn  Argparse(comptime result_type: type) type {
+
+    return struct {
+        const Self = @This();
+
+        allocator: std.mem.Allocator,
+
+        fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .allocator = allocator
+            };
+        }
+
+        fn deinit(self: *Self) void {
+            _ = self;
+        }
+
+        fn conclude(_: *Self, result: *result_type, args: []const []const u8) bool {
+            _ = result;
+            _ = args;
+
+            return true;
+        }
+
+        fn argument(_: *Self, comptime long: []const u8, comptime parser: anytype) void {
+            if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid flag format. It must start with '--'. Found: " ++ long);
+            _ = parser;
+            // Verify that field exists in struct
+            // Assume long starts with --, and derive fieldname from this. TODO: support override via param-struct.
+            const field = long[2..];
+            _  = field;
+
+        }
+    };
+}
+
+test "exploration" {
+    var parser = Argparse(Result).init(std.testing.allocator);
+    defer parser.deinit();
+
+    parser.argument("--a", parseInt);
+
+    var result: Result = undefined;
+    try testing.expect(parser.conclude(&result, &.{"--a=1"}));
+    try testing.expect(result.a == 1);
 }
 
 // Plan:
