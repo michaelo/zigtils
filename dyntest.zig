@@ -60,7 +60,7 @@ pub fn ParserForResultType(comptime ResultT: type) type {
                         break :blk f;
                     }
                 } else {
-                    @compileError("no such field: " ++ field);
+                    @compileError("no such field: " ++ @typeName(ResultT) ++ "." ++ field);
                 };
 
                 // Verify type-equality
@@ -128,38 +128,116 @@ test "2dyn" {
     // Can I store them in a map, dynamically look up and utilize to populate a struct?
 }
 
-fn  Argparse(comptime result_type: type) type {
+fn ArgparseEntry(comptime result_type: type) type {
+    return struct {
+        parser: *ParserForResultType(result_type),
+    };
+}
 
+fn  Argparse(comptime result_type: type) type {
     return struct {
         const Self = @This();
+        const Parser = ParserForResultType(result_type);
+
+        argument_list: std.StringHashMap(ArgparseEntry(result_type)),
 
         allocator: std.mem.Allocator,
 
         fn init(allocator: std.mem.Allocator) Self {
             return .{
-                .allocator = allocator
+                .allocator = allocator,
+                .argument_list = std.StringHashMap(ArgparseEntry(result_type)).init(allocator)
             };
         }
 
         fn deinit(self: *Self) void {
-            _ = self;
+            var it = self.argument_list.valueIterator();
+            while(it.next()) |field| {
+                self.allocator.destroy(field.parser);
+            }
+
+            self.argument_list.deinit();
+        }
+        
+        fn areAllFieldsConfigured(self: *Self) bool {
+            var result = true;
+            const info = @typeInfo(result_type);
+        
+            inline for (info.Struct.fields) |field| {
+                switch(@typeInfo(field.type)) {
+                    .Union => {
+                        @compileError("Subcommands not yet supported");
+                        // inline for(value.fields) |union_field| {
+                        //     if(!evaluate(union_field.type, lookup_list, prefix ++ field.name ++ "." ++ union_field.name ++ ".")) {
+                        //         result = false;
+                        //     }
+                        // }
+                    },
+                    .Struct => {
+                        @compileError("Nonsensical. No logic idea of what structs should represent here.");
+                    },
+                    else => {
+                        if (self.argument_list.get(field.name) == null){
+                            // TODO: Can we solve this comptime? Assume we must pass the entire config-struct in one pass though.
+                            print("error: Field {s}.{s} is not configured\n", .{@typeName(result_type), field.name});
+                            result = false;
+                        }
+                    }
+                }
+            }
+        
+            return result;
         }
 
-        fn conclude(_: *Self, result: *result_type, args: []const []const u8) bool {
-            _ = result;
-            _ = args;
+        fn conclude(self: *Self, result: *result_type, args: []const []const u8) bool {
+            // Phase 1: Evaluate that all fields are configured
+            if(!self.areAllFieldsConfigured()) return false;
+
+            // Phase 2: Attempt parse to result
+            for(args) |arg| {
+                if(arg.len < 3) {
+                    print("error: invalid argument format. Too short.\n", .{});
+                    return false;
+                }
+                if(!std.mem.startsWith(u8, arg, "--")) {
+                    print("error: invalid argument format. Should start with --.\n", .{});
+                    return false;
+                }
+
+                // Check if flag or argument (has = or not)
+                if(std.mem.indexOf(u8, arg, "=")) |eql_idx| {
+                    var key = arg[2..eql_idx];
+                    var val = arg[eql_idx+1..];
+
+                    if(self.argument_list.get(key)) |field_def| {
+                        field_def.parser.parse(val, result) catch |e| {
+                            print("error: got error parsing value: {s}\n", .{@errorName(e)});
+                        };
+                    } else {
+                        print("error: field not supported.\n", .{});
+                    }
+                } else {
+                    // TODO: handle seems-to-be-flag
+                }
+            }
 
             return true;
         }
 
-        fn argument(_: *Self, comptime long: []const u8, comptime parser: anytype) void {
-            if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid flag format. It must start with '--'. Found: " ++ long);
-            _ = parser;
-            // Verify that field exists in struct
-            // Assume long starts with --, and derive fieldname from this. TODO: support override via param-struct.
+        fn argument(self: *Self, comptime long: []const u8, comptime parseFunc: anytype) !void {
+            if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
             const field = long[2..];
-            _  = field;
+            
+            // Assume long starts with --, and derive fieldname from this. TODO: support override via param-struct.
+            // This will also verify that field exists in struct
+            const field_parser_type = Parser.createFieldParser(field, parseFunc);
+            
+            var ptr = try self.allocator.create(field_parser_type);
+            ptr.* = .{};
 
+            try self.argument_list.put(field, .{
+                .parser = @ptrCast(*Parser, ptr)
+            });
         }
     };
 }
@@ -168,11 +246,13 @@ test "exploration" {
     var parser = Argparse(Result).init(std.testing.allocator);
     defer parser.deinit();
 
-    parser.argument("--a", parseInt);
+    try parser.argument("--a", parseInt);
+    try parser.argument("--b", parseString);
 
     var result: Result = undefined;
-    try testing.expect(parser.conclude(&result, &.{"--a=1"}));
-    try testing.expect(result.a == 1);
+    try testing.expect(parser.conclude(&result, &.{"--a=123", "--b=321"}));
+    try testing.expect(result.a == 123);
+    try testing.expectEqualStrings("321", result.b);
 }
 
 // Plan:
