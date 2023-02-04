@@ -131,6 +131,8 @@ test "2dyn" {
 fn ArgparseEntry(comptime result_type: type) type {
     return struct {
         parser: *ParserForResultType(result_type),
+        long: []const u8,
+        help: []const u8,
     };
 }
 
@@ -142,11 +144,18 @@ fn  Argparse(comptime result_type: type) type {
         argument_list: std.StringHashMap(ArgparseEntry(result_type)),
 
         allocator: std.mem.Allocator,
+        help_head: ?[]const u8,
+        help_tail: ?[]const u8,
 
-        fn init(allocator: std.mem.Allocator) Self {
+        fn init(allocator: std.mem.Allocator, init_params: struct {
+            help_head: ?[]const u8 = null,
+            help_tail: ?[]const u8 = null
+        }) Self {
             return .{
                 .allocator = allocator,
-                .argument_list = std.StringHashMap(ArgparseEntry(result_type)).init(allocator)
+                .argument_list = std.StringHashMap(ArgparseEntry(result_type)).init(allocator),
+                .help_head = init_params.help_head,
+                .help_tail = init_params.help_tail,
             };
         }
 
@@ -158,7 +167,7 @@ fn  Argparse(comptime result_type: type) type {
 
             self.argument_list.deinit();
         }
-        
+
         fn areAllFieldsConfigured(self: *Self) bool {
             var result = true;
             const info = @typeInfo(result_type);
@@ -196,11 +205,11 @@ fn  Argparse(comptime result_type: type) type {
             // Phase 2: Attempt parse to result
             for(args) |arg| {
                 if(arg.len < 3) {
-                    print("error: invalid argument format. Too short.\n", .{});
+                    print("error: invalid argument format. Expected '--argname', got {s}.\n", .{arg});
                     return false;
                 }
                 if(!std.mem.startsWith(u8, arg, "--")) {
-                    print("error: invalid argument format. Should start with --.\n", .{});
+                    print("error: invalid argument format. Should start with --, got {s}.\n", .{arg});
                     return false;
                 }
 
@@ -224,7 +233,7 @@ fn  Argparse(comptime result_type: type) type {
             return true;
         }
 
-        fn argument(self: *Self, comptime long: []const u8, comptime parseFunc: anytype) !void {
+        fn argument(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8) !void {
             if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
             const field = long[2..];
             
@@ -236,8 +245,22 @@ fn  Argparse(comptime result_type: type) type {
             ptr.* = .{};
 
             try self.argument_list.put(field, .{
-                .parser = @ptrCast(*Parser, ptr)
+                .parser = @ptrCast(*Parser, ptr),
+                .long = long,
+                .help = help_text,
             });
+        }
+
+        fn help(self: *Self, writer: anytype) !void {
+            if(!self.areAllFieldsConfigured()) return error.IncompleteDefinition;
+            if(self.help_head) |text| writer.print("{s}\n", .{text}) catch {};
+
+            var it = self.argument_list.iterator();
+            while(it.next()) |field| {
+                writer.print("  {s} {s}\n", .{field.value_ptr.long, field.value_ptr.help}) catch {};
+            }
+
+            if(self.help_tail) |text| writer.print("{s}\n", .{text}) catch {};
         }
     };
 }
@@ -254,6 +277,53 @@ test "exploration" {
     try testing.expect(result.a == 123);
     try testing.expectEqualStrings("321", result.b);
 }
+
+const mtest = @import("mtest.zig");
+
+test "argparse.help() shall print head and tail text, if provided" {
+    const MyResult = struct {};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{
+        .help_head = "MyApp v1.0",
+        .help_tail = "(c) Michael Odden"
+    });
+    defer parser.deinit();
+
+    var output_buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_buf.deinit();
+
+    try parser.help(output_buf.writer());
+
+    try mtest.expectStringContains(output_buf.items, "MyApp v1.0");
+    try mtest.expectStringContains(output_buf.items, "(c) Michael Odden");
+}
+
+test "argparse.help() shall print help-text for all params" {
+    const MyResult = struct {a: usize};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{
+        .help_head = "MyApp v1.0",
+        .help_tail = "(c) Michael Odden"
+    });
+    defer parser.deinit();
+
+    var output_buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_buf.deinit();
+
+    try parser.argument("--a", parseInt, "help text for 'a'");
+
+    try parser.help(output_buf.writer());
+
+    try mtest.expectStringContains(output_buf.items, "--a");
+    try mtest.expectStringContains(output_buf.items, "help text for 'a'");
+}
+
+
+// test "comptime all the way" {
+//     var parser = Argparse(Result).init(&.{
+//         .{}
+//     });
+// }
 
 // Plan:
 // Incorporate this into argparse, which will handle allocations, and final evaluations
