@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const print = std.debug.print;
 
-const ParseError = error{
+pub const ParseError = error{
     NotFound,
     InvalidFormat,
 };
@@ -88,9 +88,6 @@ pub fn ParserForResultType(comptime ResultT: type) type {
     };
 }
 
-
-const Result = struct { a: usize, b: []const u8 };
-
 pub inline fn parseInt(val: []const u8) ParseError!usize {
     return std.fmt.parseInt(usize, val, 10) catch {
         return ParseError.InvalidFormat;
@@ -101,33 +98,6 @@ pub inline fn parseString(val: []const u8) ParseError![]const u8 {
     return val;
 }
 
-test "2dyn" {
-    var allocator = std.testing.allocator;
-
-    const Parser = ParserForResultType(Result);
-
-    var intparser = Parser.createFieldParser("a", parseInt){};
-    var stringparser = Parser.createFieldParser("b", parseString){};
-
-    
-    var list = std.ArrayList(*Parser).init(allocator);
-    defer list.deinit();
-
-    try list.append(@ptrCast(*Parser, &intparser));
-    try list.append(@ptrCast(*Parser, &stringparser));
-
-
-    var result: Result = undefined;
-    for (list.items) |entry| {
-        try entry.parse("321", &result);
-    }
-
-    try testing.expect(result.a == 321);
-    try testing.expectEqualStrings("321", result.b);
-
-    // Can I store them in a map, dynamically look up and utilize to populate a struct?
-}
-
 fn ArgparseEntry(comptime result_type: type) type {
     return struct {
         parser: *ParserForResultType(result_type),
@@ -136,7 +106,7 @@ fn ArgparseEntry(comptime result_type: type) type {
     };
 }
 
-fn  Argparse(comptime result_type: type) type {
+pub fn Argparse(comptime result_type: type) type {
     return struct {
         const Self = @This();
         const Parser = ParserForResultType(result_type);
@@ -147,7 +117,7 @@ fn  Argparse(comptime result_type: type) type {
         help_head: ?[]const u8,
         help_tail: ?[]const u8,
 
-        fn init(allocator: std.mem.Allocator, init_params: struct {
+        pub fn init(allocator: std.mem.Allocator, init_params: struct {
             help_head: ?[]const u8 = null,
             help_tail: ?[]const u8 = null
         }) Self {
@@ -159,7 +129,7 @@ fn  Argparse(comptime result_type: type) type {
             };
         }
 
-        fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self) void {
             var it = self.argument_list.valueIterator();
             while(it.next()) |field| {
                 self.allocator.destroy(field.parser);
@@ -198,19 +168,27 @@ fn  Argparse(comptime result_type: type) type {
             return result;
         }
 
-        fn conclude(self: *Self, result: *result_type, args: []const []const u8) bool {
+        fn evaluateParam() void {
+
+        }
+
+        fn evaluateFlag() void {
+
+        }
+
+        pub fn conclude(self: *Self, result: *result_type, args: []const []const u8) !void {
             // Phase 1: Evaluate that all fields are configured
-            if(!self.areAllFieldsConfigured()) return false;
+            if(!self.areAllFieldsConfigured()) return error.IncompleteConfiguration;
 
             // Phase 2: Attempt parse to result
             for(args) |arg| {
                 if(arg.len < 3) {
                     print("error: invalid argument format. Expected '--argname', got {s}.\n", .{arg});
-                    return false;
+                    return error.InvalidFormat;
                 }
                 if(!std.mem.startsWith(u8, arg, "--")) {
                     print("error: invalid argument format. Should start with --, got {s}.\n", .{arg});
-                    return false;
+                    return error.InvalidFormat;
                 }
 
                 // Check if flag or argument (has = or not)
@@ -221,19 +199,27 @@ fn  Argparse(comptime result_type: type) type {
                     if(self.argument_list.get(key)) |field_def| {
                         field_def.parser.parse(val, result) catch |e| {
                             print("error: got error parsing value: {s}\n", .{@errorName(e)});
+                            return error.InvalidFormat;
                         };
                     } else {
-                        print("error: field not supported.\n", .{});
+                        print("error: argument '{s}' not supported.\n", .{key});
+                        return error.NoSuchArgument;
                     }
                 } else {
                     // TODO: handle seems-to-be-flag
+                    var key = arg[2..];
+                    if(self.argument_list.get(key)) |field_def| {
+                        // TOOD: evaluate flag action
+                        _ = field_def;
+                    } else {
+                        print("error: argument '{s}' not supported.\n", .{key});
+                        return error.NoSuchArgument;
+                    }
                 }
             }
-
-            return true;
         }
 
-        fn argument(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8) !void {
+        pub fn argument(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8) !void {
             if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
             const field = long[2..];
             
@@ -251,7 +237,7 @@ fn  Argparse(comptime result_type: type) type {
             });
         }
 
-        fn help(self: *Self, writer: anytype) !void {
+        pub fn help(self: *Self, writer: anytype) !void {
             if(!self.areAllFieldsConfigured()) return error.IncompleteDefinition;
             if(self.help_head) |text| writer.print("{s}\n", .{text}) catch {};
 
@@ -266,14 +252,15 @@ fn  Argparse(comptime result_type: type) type {
 }
 
 test "exploration" {
-    var parser = Argparse(Result).init(std.testing.allocator);
+    const Result = struct { a: usize, b: []const u8 };
+    var parser = Argparse(Result).init(std.testing.allocator, .{});
     defer parser.deinit();
 
-    try parser.argument("--a", parseInt);
-    try parser.argument("--b", parseString);
+    try parser.argument("--a", parseInt, "");
+    try parser.argument("--b", parseString, "");
 
     var result: Result = undefined;
-    try testing.expect(parser.conclude(&result, &.{"--a=123", "--b=321"}));
+    try parser.conclude(&result, &.{"--a=123", "--b=321"});
     try testing.expect(result.a == 123);
     try testing.expectEqualStrings("321", result.b);
 }
@@ -318,8 +305,21 @@ test "argparse.help() shall print help-text for all params" {
     try mtest.expectStringContains(output_buf.items, "help text for 'a'");
 }
 
+test "argparse given '--help' shall show help and abort evaluation" {
+    const MyResult = struct {};
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{});
+    defer parser.deinit();
 
-// test "comptime all the way" {
+    var output_buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_buf.deinit();
+
+    var result: MyResult = undefined;
+    try testing.expectError(error.GotHelp, parser.conclude(&result, &.{"--help"}));
+}
+
+
+// test "comptime all the way?" {
+//     Initiate the entire configuration in a comptime list/map, evaluated for completeness at comptime. Then only the actual parsing will finally be done runtime
 //     var parser = Argparse(Result).init(&.{
 //         .{}
 //     });
