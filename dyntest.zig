@@ -138,7 +138,7 @@ pub fn Argparse(comptime result_type: type) type {
             self.argument_list.deinit();
         }
 
-        fn areAllFieldsConfigured(self: *Self) bool {
+        fn areAllFieldsConfigured(self: *Self, writer: anytype) bool {
             var result = true;
             const info = @typeInfo(result_type);
         
@@ -158,7 +158,7 @@ pub fn Argparse(comptime result_type: type) type {
                     else => {
                         if (self.argument_list.get(field.name) == null){
                             // TODO: Can we solve this comptime? Assume we must pass the entire config-struct in one pass though.
-                            print("error: Field {s}.{s} is not configured\n", .{@typeName(result_type), field.name});
+                            writer.print("error: Field {s}.{s} is not configured\n", .{@typeName(result_type), field.name}) catch {};
                             result = false;
                         }
                     }
@@ -176,19 +176,24 @@ pub fn Argparse(comptime result_type: type) type {
 
         }
 
-        pub fn conclude(self: *Self, result: *result_type, args: []const []const u8) !void {
+        pub fn conclude(self: *Self, result: *result_type, args: []const []const u8, writer: anytype) !void {
             // Phase 1: Evaluate that all fields are configured
-            if(!self.areAllFieldsConfigured()) return error.IncompleteConfiguration;
+            if(!self.areAllFieldsConfigured(writer)) return error.IncompleteConfiguration;
 
             // Phase 2: Attempt parse to result
             for(args) |arg| {
                 if(arg.len < 3) {
-                    print("error: invalid argument format. Expected '--argname', got {s}.\n", .{arg});
+                    writer.print("error: invalid argument format. Expected '--argname', got {s}.\n", .{arg}) catch {};
                     return error.InvalidFormat;
                 }
                 if(!std.mem.startsWith(u8, arg, "--")) {
-                    print("error: invalid argument format. Should start with --, got {s}.\n", .{arg});
+                    writer.print("error: invalid argument format. Should start with --, got {s}.\n", .{arg}) catch {};
                     return error.InvalidFormat;
+                }
+
+                if(std.mem.eql(u8, arg, "--help")) {
+                    try self.help(writer);
+                    return error.GotHelp;
                 }
 
                 // Check if flag or argument (has = or not)
@@ -198,11 +203,11 @@ pub fn Argparse(comptime result_type: type) type {
 
                     if(self.argument_list.get(key)) |field_def| {
                         field_def.parser.parse(val, result) catch |e| {
-                            print("error: got error parsing value: {s}\n", .{@errorName(e)});
+                            writer.print("error: got error parsing value: {s}\n", .{@errorName(e)}) catch {};
                             return error.InvalidFormat;
                         };
                     } else {
-                        print("error: argument '{s}' not supported.\n", .{key});
+                        writer.print("error: argument '{s}' not supported.\n", .{key}) catch {};
                         return error.NoSuchArgument;
                     }
                 } else {
@@ -212,7 +217,7 @@ pub fn Argparse(comptime result_type: type) type {
                         // TOOD: evaluate flag action
                         _ = field_def;
                     } else {
-                        print("error: argument '{s}' not supported.\n", .{key});
+                        writer.print("error: argument '{s}' not supported.\n", .{key}) catch {};
                         return error.NoSuchArgument;
                     }
                 }
@@ -238,7 +243,7 @@ pub fn Argparse(comptime result_type: type) type {
         }
 
         pub fn help(self: *Self, writer: anytype) !void {
-            if(!self.areAllFieldsConfigured()) return error.IncompleteDefinition;
+            if(!self.areAllFieldsConfigured(writer)) return error.IncompleteDefinition;
             if(self.help_head) |text| writer.print("{s}\n", .{text}) catch {};
 
             var it = self.argument_list.iterator();
@@ -260,7 +265,7 @@ test "exploration" {
     try parser.argument("--b", parseString, "");
 
     var result: Result = undefined;
-    try parser.conclude(&result, &.{"--a=123", "--b=321"});
+    try parser.conclude(&result, &.{"--a=123", "--b=321"}, std.io.getStdErr().writer());
     try testing.expect(result.a == 123);
     try testing.expectEqualStrings("321", result.b);
 }
@@ -307,14 +312,16 @@ test "argparse.help() shall print help-text for all params" {
 
 test "argparse given '--help' shall show help and abort evaluation" {
     const MyResult = struct {};
-    var parser = Argparse(MyResult).init(std.testing.allocator, .{});
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{.help_head="Help-test"});
     defer parser.deinit();
 
     var output_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer output_buf.deinit();
 
     var result: MyResult = undefined;
-    try testing.expectError(error.GotHelp, parser.conclude(&result, &.{"--help"}));
+    try testing.expectError(error.GotHelp, parser.conclude(&result, &.{"--help"}, output_buf.writer()));
+
+    try mtest.expectStringContains(output_buf.items, "Help-test");
 }
 
 
