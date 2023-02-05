@@ -5,6 +5,8 @@ const print = std.debug.print;
 pub const ParseError = error{
     NotFound,
     InvalidFormat,
+    LowerBoundBreach,
+    UpperBoundBreach,
 };
 
 // Extract the actual data type, even given error unions or optionals
@@ -66,7 +68,7 @@ pub fn ParserForResultType(comptime ResultT: type) type {
                 // Verify type-equality
                 const coreTypeOfFunc = coreTypeOf(returnTypeOf(funcImpl));
                 if(structField.type != coreTypeOfFunc) {
-                    @compileError("Incompatible types: " ++ @typeName(structField.type) ++ " vs " ++ coreTypeOfFunc);
+                    @compileError("Incompatible types: field is " ++ @typeName(structField.type) ++ ", parse function returns " ++ @typeName(coreTypeOfFunc));
                 }
             }
 
@@ -98,20 +100,65 @@ pub inline fn parseString(val: []const u8) ParseError![]const u8 {
     return val;
 }
 
+pub inline fn _true(_: []const u8)  ParseError!bool {
+    return true;
+}
+
+pub fn lengthedString(comptime min: usize, comptime max: usize) fn([]const u8)ParseError![]const u8 {
+    return struct {
+        pub fn func(val: []const u8) ParseError![]const u8 {
+            if(val.len < min) return error.LowerBoundBreach;
+            if(val.len > max) return error.UpperBoundBreach;
+            return val;
+        }
+    }.func;
+}
+
+const ArgumentType = enum { param, flag };
+
 fn ArgparseEntry(comptime result_type: type) type {
     return struct {
+        arg_type: ArgumentType,
         parser: *ParserForResultType(result_type),
         long: []const u8,
         help: []const u8,
+        visited: bool = false, // Used to verify which fields we have processed
     };
 }
 
+// Argparse - basic, type-safe argument parser.
+// The design goal is to provide a minimal-overhead solution with regards to amount of configuration required, while still 
+// resulting in a "safe" state if .conclude() succeeds.
+// 
+// Att! when using .parseString to parse string-arguments, it will simply store the slice-reference, and thus require the 
+//      corresponding input argument to stay in the same memory as long as it's accessed. A solution to parse to array is 
+//      on the way (TODO)
+//
+// Supported features:
+//    flag: --longform
+//    parameter: --longform=value
+// 
+// Planned features:
+//    subcommand
+//    shortform flag and parameter: -s 
+//    positional arguments? TBD. Not a priority
+//    space-separated parameters in addition to =-separated? TBD. Not a priority.
+//
+// Main API:
+//   .init()
+//   .deinit()
+//   
+//   .param() - Register a new argument-config corresponding to a field in the destination struct. All fields in struct must be configured.
+//                 Currently, the long-form name of the argument must be 1:1 (without the dashes) with the corresponding struct-field.
+//   .conclude() - Ensures that all struct-fields have a matching argument-configuration, as well as executes all parsers.
+//                 If this succeeds, then you shall be safe that the result-struct is well-defined and ready to use.
 pub fn Argparse(comptime result_type: type) type {
     return struct {
         const Self = @This();
         const Parser = ParserForResultType(result_type);
 
         argument_list: std.StringHashMap(ArgparseEntry(result_type)),
+        visited_list: std.StringHashMap(bool),
 
         allocator: std.mem.Allocator,
         help_head: ?[]const u8,
@@ -124,6 +171,7 @@ pub fn Argparse(comptime result_type: type) type {
             return .{
                 .allocator = allocator,
                 .argument_list = std.StringHashMap(ArgparseEntry(result_type)).init(allocator),
+                .visited_list = std.StringHashMap(bool).init(allocator),
                 .help_head = init_params.help_head,
                 .help_tail = init_params.help_tail,
             };
@@ -136,6 +184,7 @@ pub fn Argparse(comptime result_type: type) type {
             }
 
             self.argument_list.deinit();
+            self.visited_list.deinit();
         }
 
         fn areAllFieldsConfigured(self: *Self, writer: anytype) bool {
@@ -180,6 +229,9 @@ pub fn Argparse(comptime result_type: type) type {
             // Phase 1: Evaluate that all fields are configured
             if(!self.areAllFieldsConfigured(writer)) return error.IncompleteConfiguration;
 
+            // Resetting visited-list
+            self.visited_list.clearAndFree();
+
             // Phase 2: Attempt parse to result
             for(args) |arg| {
                 if(arg.len < 3) {
@@ -202,8 +254,21 @@ pub fn Argparse(comptime result_type: type) type {
                     var val = arg[eql_idx+1..];
 
                     if(self.argument_list.get(key)) |field_def| {
+                        if(self.visited_list.get(key) != null) {
+                            writer.print("error: '{s}' already processed\n", .{key}) catch {};
+                            return error.InvalidFormat;
+                        }
+                        try self.visited_list.put(key, true);
+
+                        // Expect param-definiton
+                        if(field_def.arg_type != .param) {
+                            writer.print("error: got parameter-style for non-parameter '{s}'\n", .{key}) catch {};
+                            return error.InvalidFormat;
+                        }
+
+                        // 
                         field_def.parser.parse(val, result) catch |e| {
-                            writer.print("error: got error parsing value: {s}\n", .{@errorName(e)}) catch {};
+                            writer.print("error: got error parsing {s}-value '{s}': {s}\n", .{key,val, @errorName(e)}) catch {};
                             return error.InvalidFormat;
                         };
                     } else {
@@ -214,17 +279,91 @@ pub fn Argparse(comptime result_type: type) type {
                     // TODO: handle seems-to-be-flag
                     var key = arg[2..];
                     if(self.argument_list.get(key)) |field_def| {
+                        if(self.visited_list.get(key) != null) {
+                            writer.print("error: '{s}' already processed\n", .{key}) catch {};
+                            return error.InvalidFormat;
+                        }
+                        try self.visited_list.put(key, true);
+
+                        if(field_def.arg_type != .flag) {
+                            writer.print("error: got flag-style for non-flag '{s}'\n", .{key}) catch {};
+                            return error.InvalidFormat;
+                        }
+
+                        field_def.parser.parse("", result) catch |e| {
+                            writer.print("error: got error storing value for flag '{s}': {s}\n", .{key, @errorName(e)}) catch {};
+                            return error.InvalidFormat;
+                        };
                         // TOOD: evaluate flag action
-                        _ = field_def;
                     } else {
                         writer.print("error: argument '{s}' not supported.\n", .{key}) catch {};
                         return error.NoSuchArgument;
                     }
                 }
             }
+
+            // Phase 3: check all unvisited, handle eventual defaults
+            // TODO: Iterate struct fields, comptime!
+            // var it = self.argument_list.iterator();
+            // while(it.next()) |entry| {
+            //     if(self.visited_list.get(entry.key_ptr.*) != null) continue;
+
+            //     // TODO: How can we assign default-values to fields? Shall we rather iterate the struct comptime here, rather than argument_list? Yes!
+            //     switch(entry.value_ptr.arg_type) {
+            //         .flag => {
+            //             // Optional by design, set to false
+            //         },
+            //         .param => {
+            //             // Check for required or default
+            //         }
+            //     }
+            // }
+
+            const info = @typeInfo(result_type);
+        
+            inline for (info.Struct.fields) |field| {
+                switch(@typeInfo(field.type)) {
+                    .Union => {
+                        @compileError("Subcommands not yet supported");
+                    },
+                    .Struct => {
+                        @compileError("Nonsensical. No logic idea of what structs should represent here.");
+                    },
+                    else => {
+                        // Visited? (e.g. handled)
+                        if (self.visited_list.get(field.name) == null) {
+                            // Get entry, and evaluate optional/required and eventual default
+                            if (self.argument_list.get(field.name)) |arg_entry| {
+                                switch(arg_entry.arg_type) {
+                                    .flag => {
+                                        // Optional by design, set to false
+                                        // For some reason we have to check the type here, as seemingly all branches are evaluated during compile-time
+                                        if(@TypeOf(@field(result, field.name)) == bool) {
+                                            @field(result, field.name) = false;
+                                        }
+                                    },
+                                    .param => {
+                                        // Check for required or default
+                                        // if required: error
+                                        // if default: set default
+                                    }
+                                }
+                            } else {
+                                // TODO: Can we solve this comptime? Assume we must pass the entire config-struct in one pass though.
+                                writer.print("error: Field {s}.{s} is not configured\n", .{@typeName(result_type), field.name}) catch {};
+                            }
+                        } else {
+                        }
+                    }
+                }
+            }
         }
 
-        pub fn argument(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8) !void {
+        // TODO: pub fn argument() <- general variant backing both param() and flag()
+
+        // Main function to configure params to check for.
+        // TODO: Have parseFunc be optional, and look up based on field-type?
+        pub fn param(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8) !void {
             if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
             const field = long[2..];
             
@@ -236,6 +375,24 @@ pub fn Argparse(comptime result_type: type) type {
             ptr.* = .{};
 
             try self.argument_list.put(field, .{
+                .arg_type = .param,
+                .parser = @ptrCast(*Parser, ptr),
+                .long = long,
+                .help = help_text,
+            });
+        }
+
+        pub fn flag(self: *Self, comptime long: []const u8, comptime help_text: []const u8) !void {
+            if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
+            const field = long[2..];
+
+            const field_parser_type = Parser.createFieldParser(field, _true);
+
+            var ptr = try self.allocator.create(field_parser_type);
+            ptr.* = .{};
+
+            try self.argument_list.put(field, .{
+                .arg_type = .flag,
                 .parser = @ptrCast(*Parser, ptr),
                 .long = long,
                 .help = help_text,
@@ -244,11 +401,20 @@ pub fn Argparse(comptime result_type: type) type {
 
         pub fn help(self: *Self, writer: anytype) !void {
             if(!self.areAllFieldsConfigured(writer)) return error.IncompleteDefinition;
+
+
             if(self.help_head) |text| writer.print("{s}\n", .{text}) catch {};
 
-            var it = self.argument_list.iterator();
-            while(it.next()) |field| {
-                writer.print("  {s} {s}\n", .{field.value_ptr.long, field.value_ptr.help}) catch {};
+            // List all arguments
+            if(self.argument_list.count() > 0) {
+                var it = self.argument_list.iterator();
+                writer.print("\nArguments:\n", .{}) catch {};
+
+                while(it.next()) |field| {
+                    writer.print("  {s}=<val> {s}\n", .{field.value_ptr.long, field.value_ptr.help}) catch {};
+                }
+
+                writer.print("\n", .{}) catch {};
             }
 
             if(self.help_tail) |text| writer.print("{s}\n", .{text}) catch {};
@@ -256,13 +422,13 @@ pub fn Argparse(comptime result_type: type) type {
     };
 }
 
-test "exploration" {
+test "argparse shall support arbitrary argument types" {
     const Result = struct { a: usize, b: []const u8 };
     var parser = Argparse(Result).init(std.testing.allocator, .{});
     defer parser.deinit();
 
-    try parser.argument("--a", parseInt, "");
-    try parser.argument("--b", parseString, "");
+    try parser.param("--a", parseInt, "");
+    try parser.param("--b", parseString, "");
 
     var result: Result = undefined;
     try parser.conclude(&result, &.{"--a=123", "--b=321"}, std.io.getStdErr().writer());
@@ -302,7 +468,7 @@ test "argparse.help() shall print help-text for all params" {
     var output_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer output_buf.deinit();
 
-    try parser.argument("--a", parseInt, "help text for 'a'");
+    try parser.param("--a", parseInt, "help text for 'a'");
 
     try parser.help(output_buf.writer());
 
@@ -322,6 +488,32 @@ test "argparse given '--help' shall show help and abort evaluation" {
     try testing.expectError(error.GotHelp, parser.conclude(&result, &.{"--help"}, output_buf.writer()));
 
     try mtest.expectStringContains(output_buf.items, "Help-test");
+}
+
+test "argparse shall support value-less bool-backed parameters, i.e. flags. True if set, otherwise false." {
+    // Initiate
+    const MyResult = struct {myflag: bool};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{});
+    defer parser.deinit();
+
+    try parser.flag("--myflag", "flag goes here");
+
+
+    // Evaluate
+    var result: MyResult = undefined;
+
+    // Test without flag
+    try parser.conclude(&result, &.{}, std.io.getStdErr().writer());
+    try testing.expect(!result.myflag);
+
+    // Test with flag
+    try parser.conclude(&result, &.{"--myflag"}, std.io.getStdErr().writer());
+    try testing.expect(result.myflag);
+
+    // Test without flag
+    try parser.conclude(&result, &.{}, std.io.getStdErr().writer());
+    try testing.expect(!result.myflag);
 }
 
 

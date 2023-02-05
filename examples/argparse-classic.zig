@@ -2,7 +2,7 @@ const std = @import("std");
 const argparse = @import("../dyntest.zig");
 
 const MyArgs = struct {
-    
+    output: []const u8,
 };
 
 pub fn main() !void {
@@ -17,6 +17,8 @@ pub fn main() !void {
         .help_tail = "(c) Michael Odden"
     });
     defer parser.deinit();
+
+    try parser.param("--output", argparse.lengthedString(3,1024), "Specify file to write results to");
 
     // Get command-line argaments list
     // TODO: support using process.argsWithAllocator directly?
