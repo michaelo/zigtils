@@ -127,24 +127,28 @@ pub fn parseEnum(comptime enum_type: type) fn ([]const u8) ParseError!enum_type 
     }.func;
 }
 
-// Generate a comptime, comma-separated string of all values in an enum (truncated at full element fit < 1024 bytes)
+// Generate a comptime, comma-separated string of all values in an enum
 pub fn enumValues(comptime enumType: type) []const u8 {
     comptime {
         const typeInfo = @typeInfo(enumType).Enum;
 
-        var result: [1024]u8 = undefined;
+        // Get required len to be able to store all enum field-names
+        var required_len: usize = 0;
+        for(typeInfo.fields) |field| {
+            required_len += field.name.len+1; // incl trailing comma
+        }
+
+        // Generate comma-separated string of all enum field-names
+        var result: [required_len]u8 = undefined;
         var len: usize = 0;
 
         for(typeInfo.fields) |field| {
             var added_chunk = field.name ++ ",";
-            
-            if(len+added_chunk.len > result.len) break;
-
-            std.mem.copy(u8, result[len..], added_chunk.len);
+            std.mem.copy(u8, result[len..], added_chunk);
             len += added_chunk.len;
         }
 
-        // Trim trailing comma:
+        // Trim trailing comma and return:
         return result[0..len-1];
     }
 }
