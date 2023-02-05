@@ -153,12 +153,21 @@ pub fn enumValues(comptime enumType: type) []const u8 {
     }
 }
 
+pub fn constant(comptime value: anytype) fn([]const u8)ParseError!@TypeOf(value) {
+    return struct {
+        fn func(_: []const u8) ParseError!@TypeOf(value) {
+            return value;
+        }
+    }.func;
+}
+
 const ArgumentType = enum { param, flag };
 
 fn ArgparseEntry(comptime result_type: type) type {
     return struct {
         arg_type: ArgumentType,
         parser: *ParserForResultType(result_type),
+        default_provider: ?*ParserForResultType(result_type),
         long: []const u8,
         help: []const u8,
         visited: bool = false, // Used to verify which fields we have processed
@@ -187,7 +196,7 @@ fn ArgparseEntry(comptime result_type: type) type {
 //   .init()
 //   .deinit()
 //   
-//   .param() - Register a new argument-config corresponding to a field in the destination struct. All fields in struct must be configured.
+//   .param() - Register a new argument-config corresponding to a field in the destination struct. All fields in struct must be configure, .{}d.
 //                 Currently, the long-form name of the argument must be 1:1 (without the dashes) with the corresponding struct-field.
 //   .conclude() - Ensures that all struct-fields have a matching argument-configuration, as well as executes all parsers.
 //                 If this succeeds, then you shall be safe that the result-struct is well-defined and ready to use.
@@ -220,6 +229,9 @@ pub fn Argparse(comptime result_type: type) type {
             var it = self.argument_list.valueIterator();
             while(it.next()) |field| {
                 self.allocator.destroy(field.parser);
+                if(field.default_provider) |default| {
+                    self.allocator.destroy(default);
+                }
             }
 
             self.argument_list.deinit();
@@ -383,8 +395,13 @@ pub fn Argparse(comptime result_type: type) type {
                                     },
                                     .param => {
                                         // Check for required or default
-                                        writer.print("error: missing required argument '{s}'\n", .{arg_entry.long}) catch {};
-                                        return error.InvalidFormat;
+                                        if(arg_entry.default_provider) |default_provider| {
+                                            // @field(result, field.name) = default_value; <-- test this approach if we can store the actual type
+                                            try default_provider.parse("", result);
+                                        } else {
+                                            writer.print("error: missing required argument '{s}'\n", .{arg_entry.long}) catch {};
+                                            return error.InvalidFormat;
+                                        }
                                         // if required: error
                                         // if default: set default
                                     }
@@ -404,20 +421,33 @@ pub fn Argparse(comptime result_type: type) type {
 
         // Main function to configure params to check for.
         // TODO: Have parseFunc be optional, and look up based on field-type?
-        pub fn param(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8) !void {
+        pub fn param(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8, comptime params: struct {
+            default: ?coreTypeOf(returnTypeOf(parseFunc)) = null
+        }) !void {
             if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
             const field = long[2..];
             
             // Assume long starts with --, and derive fieldname from this. TODO: support override via param-struct.
-            // This will also verify that field exists in struct
-            const field_parser_type = Parser.createFieldParser(field, parseFunc);
-            
-            var ptr = try self.allocator.create(field_parser_type);
-            ptr.* = .{};
+            // Parser.createFieldParser will also verify that field exists in struct
+
+            var parser_func_ptr = try self.allocator.create(Parser.createFieldParser(field, parseFunc));
+            parser_func_ptr.* = .{};
+
+            // If default-value provided; Generate a "parser" that always returns the default-value
+            var default_func_ptr = blk: {
+                if(params.default) |default| {
+                    var ptr = try self.allocator.create(Parser.createFieldParser(field, constant(default)));
+                    ptr.* = .{};
+                    break :blk ptr;
+                } else {
+                    break :blk null;
+                }
+            };
 
             try self.argument_list.put(field, .{
                 .arg_type = .param,
-                .parser = @ptrCast(*Parser, ptr),
+                .parser = @ptrCast(*Parser, parser_func_ptr),
+                .default_provider = @ptrCast(*Parser, default_func_ptr),
                 .long = long,
                 .help = help_text,
             });
@@ -435,6 +465,7 @@ pub fn Argparse(comptime result_type: type) type {
             try self.argument_list.put(field, .{
                 .arg_type = .flag,
                 .parser = @ptrCast(*Parser, ptr),
+                .default_provider = null,
                 .long = long,
                 .help = help_text,
             });
@@ -468,8 +499,8 @@ test "argparse shall support arbitrary argument types" {
     var parser = Argparse(Result).init(std.testing.allocator, .{});
     defer parser.deinit();
 
-    try parser.param("--a", parseInt, "");
-    try parser.param("--b", parseString, "");
+    try parser.param("--a", parseInt, "", .{});
+    try parser.param("--b", parseString, "", .{});
 
     var result: Result = undefined;
     try parser.conclude(&result, &.{"--a=123", "--b=321"}, std.io.getStdErr().writer());
@@ -509,7 +540,7 @@ test "argparse.printHelp() shall print help-text for all params" {
     var output_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer output_buf.deinit();
 
-    try parser.param("--a", parseInt, "help text for 'a'");
+    try parser.param("--a", parseInt, "help text for 'a'", .{});
 
     try parser.printHelp(output_buf.writer());
 
@@ -564,12 +595,29 @@ test "argparse shall support enums" {
     var parser = Argparse(MyResult).init(std.testing.allocator, .{});
     defer parser.deinit();
 
-    try parser.param("--severity", parseEnum(Severity), "Valid values=" ++ enumValues(Severity));
-    var result: MyResult = undefined;
+    try parser.param("--severity", parseEnum(Severity), "Valid values=" ++ enumValues(Severity), .{});
 
+    var result: MyResult = undefined;
     try parser.conclude(&result, &.{"--severity=WARNING"}, std.io.getStdErr().writer());
 
     try testing.expect(result.severity == .WARNING);
+}
+
+test "argparse shall support optional arguments via default values" {
+    const MyResult = struct {a: usize};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{});
+    defer parser.deinit();
+
+    try parser.param("--a", parseInt, "Optional argument, default=21", .{.default=21});
+    
+    var result: MyResult = undefined;
+    try parser.conclude(&result, &.{}, std.io.getStdErr().writer());
+    try testing.expect(result.a == 21);
+
+    try parser.conclude(&result, &.{"--a=84"}, std.io.getStdErr().writer());
+    try testing.expect(result.a == 84);
+
 }
 // test "comptime all the way?" {
 //     Initiate the entire configuration in a comptime list/map, evaluated for completeness at comptime. Then only the actual parsing will finally be done runtime
