@@ -1,8 +1,11 @@
 const std = @import("std");
 const argparse = @import("../dyntest.zig");
 
+const Loglevel = enum { ALL, NONE };
+
 const MyArgs = struct {
     output: []const u8,
+    loglevel: Loglevel
 };
 
 pub fn main() !void {
@@ -19,15 +22,18 @@ pub fn main() !void {
     defer parser.deinit();
 
     try parser.param("--output", argparse.lengthedString(3,1024), "Specify file to write results to");
+    try parser.param("--loglevel", argparse.parseEnum(Loglevel), "Level of logging: " ++ argparse.enumValues(Loglevel));
 
     // Get command-line argaments list
     // TODO: support using process.argsWithAllocator directly?
     var cli_args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, cli_args);
 
-    // Allocate and parse. If .conclude() succeeds, the args should 
+    // Allocate and parse. If .conclude() succeeds, the args shall be assumed well defined
     var args: MyArgs = undefined;
     parser.conclude(&args, cli_args[1..], std.io.getStdErr().writer()) catch {
+        // If you want to automatically print errors upon invalid input:
+        // try parser.printHelp(std.io.getStdErr().writer());
         std.process.exit(1);
     };
 

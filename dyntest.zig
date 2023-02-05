@@ -90,20 +90,24 @@ pub fn ParserForResultType(comptime ResultT: type) type {
     };
 }
 
+// Parses value as base-10 (ten)
 pub inline fn parseInt(val: []const u8) ParseError!usize {
     return std.fmt.parseInt(usize, val, 10) catch {
         return ParseError.InvalidFormat;
     };
 }
 
+// Passthrough
 pub inline fn parseString(val: []const u8) ParseError![]const u8 {
     return val;
 }
 
+// Always true
 pub inline fn _true(_: []const u8)  ParseError!bool {
     return true;
 }
 
+// Returns a function which returns error if string outside of provided bounds
 pub fn lengthedString(comptime min: usize, comptime max: usize) fn([]const u8)ParseError![]const u8 {
     return struct {
         pub fn func(val: []const u8) ParseError![]const u8 {
@@ -112,6 +116,37 @@ pub fn lengthedString(comptime min: usize, comptime max: usize) fn([]const u8)Pa
             return val;
         }
     }.func;
+}
+
+// Returns a function to parse the provided enum type
+pub fn parseEnum(comptime enum_type: type) fn ([]const u8) ParseError!enum_type {
+    return struct {
+        fn func(raw: []const u8) !enum_type {
+            return std.meta.stringToEnum(enum_type, raw) orelse ParseError.InvalidFormat;
+        }
+    }.func;
+}
+
+// Generate a comptime, comma-separated string of all values in an enum (truncated at full element fit < 1024 bytes)
+pub fn enumValues(comptime enumType: type) []const u8 {
+    comptime {
+        const typeInfo = @typeInfo(enumType).Enum;
+
+        var result: [1024]u8 = undefined;
+        var len: usize = 0;
+
+        for(typeInfo.fields) |field| {
+            var added_chunk = field.name ++ ",";
+            
+            if(len+added_chunk.len > result.len) break;
+
+            std.mem.copy(u8, result[len..], added_chunk.len);
+            len += added_chunk.len;
+        }
+
+        // Trim trailing comma:
+        return result[0..len-1];
+    }
 }
 
 const ArgumentType = enum { param, flag };
@@ -244,7 +279,7 @@ pub fn Argparse(comptime result_type: type) type {
                 }
 
                 if(std.mem.eql(u8, arg, "--help")) {
-                    try self.help(writer);
+                    try self.printHelp(writer);
                     return error.GotHelp;
                 }
 
@@ -344,6 +379,8 @@ pub fn Argparse(comptime result_type: type) type {
                                     },
                                     .param => {
                                         // Check for required or default
+                                        writer.print("error: missing required argument '{s}'\n", .{arg_entry.long}) catch {};
+                                        return error.InvalidFormat;
                                         // if required: error
                                         // if default: set default
                                     }
@@ -399,7 +436,7 @@ pub fn Argparse(comptime result_type: type) type {
             });
         }
 
-        pub fn help(self: *Self, writer: anytype) !void {
+        pub fn printHelp(self: *Self, writer: anytype) !void {
             if(!self.areAllFieldsConfigured(writer)) return error.IncompleteDefinition;
 
 
@@ -438,7 +475,7 @@ test "argparse shall support arbitrary argument types" {
 
 const mtest = @import("mtest.zig");
 
-test "argparse.help() shall print head and tail text, if provided" {
+test "argparse.printHelp() shall print head and tail text, if provided" {
     const MyResult = struct {};
 
     var parser = Argparse(MyResult).init(std.testing.allocator, .{
@@ -450,13 +487,13 @@ test "argparse.help() shall print head and tail text, if provided" {
     var output_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer output_buf.deinit();
 
-    try parser.help(output_buf.writer());
+    try parser.printHelp(output_buf.writer());
 
     try mtest.expectStringContains(output_buf.items, "MyApp v1.0");
     try mtest.expectStringContains(output_buf.items, "(c) Michael Odden");
 }
 
-test "argparse.help() shall print help-text for all params" {
+test "argparse.printHelp() shall print help-text for all params" {
     const MyResult = struct {a: usize};
 
     var parser = Argparse(MyResult).init(std.testing.allocator, .{
@@ -470,7 +507,7 @@ test "argparse.help() shall print help-text for all params" {
 
     try parser.param("--a", parseInt, "help text for 'a'");
 
-    try parser.help(output_buf.writer());
+    try parser.printHelp(output_buf.writer());
 
     try mtest.expectStringContains(output_buf.items, "--a");
     try mtest.expectStringContains(output_buf.items, "help text for 'a'");
@@ -516,7 +553,20 @@ test "argparse shall support value-less bool-backed parameters, i.e. flags. True
     try testing.expect(!result.myflag);
 }
 
+test "argparse shall support enums" {
+    const Severity = enum { INFO, WARNING, ERROR };
+    const MyResult = struct {severity: Severity};
 
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{});
+    defer parser.deinit();
+
+    try parser.param("--severity", parseEnum(Severity), "Valid values=" ++ enumValues(Severity));
+    var result: MyResult = undefined;
+
+    try parser.conclude(&result, &.{"--severity=WARNING"}, std.io.getStdErr().writer());
+
+    try testing.expect(result.severity == .WARNING);
+}
 // test "comptime all the way?" {
 //     Initiate the entire configuration in a comptime list/map, evaluated for completeness at comptime. Then only the actual parsing will finally be done runtime
 //     var parser = Argparse(Result).init(&.{
