@@ -2,9 +2,10 @@ const std = @import("std");
 const testing = std.testing;
 const print = std.debug.print;
 
-pub const ParseError = error{
+pub const ArgparseError = error{
     NotFound,
     InvalidFormat,
+    InvalidValue,
     LowerBoundBreach,
     UpperBoundBreach,
 };
@@ -42,14 +43,14 @@ pub fn ParserForResultType(comptime ResultT: type) type {
 
         pub fn Methods(comptime T: type) type {
             return extern struct {
-                pub inline fn parse(self: *const T, raw: []const u8, result: *ResultT) ParseError!void {
+                pub inline fn parse(self: *const T, raw: []const u8, result: *ResultT) ArgparseError!void {
                     try self.__v.parse(@ptrCast(*const ParserForResultType(ResultT), self), raw, result);
                 }
             };
         }
 
         pub const VTable = extern struct {
-            parse: *const fn(self: *const ParserForResultType(ResultT), []const u8, *ResultT) ParseError!void,
+            parse: *const fn(self: *const ParserForResultType(ResultT), []const u8, *ResultT) ArgparseError!void,
         };
 
         // Creates a concrete parser for a particular field
@@ -81,7 +82,7 @@ pub fn ParserForResultType(comptime ResultT: type) type {
                     .parse = parseImpl,
                 };
 
-                pub fn parseImpl(iself: *const ParserForResultType(ResultT), raw: []const u8, result: *ResultT) ParseError!void {
+                pub fn parseImpl(iself: *const ParserForResultType(ResultT), raw: []const u8, result: *ResultT) ArgparseError!void {
                     _ = @ptrCast(*const @This(), iself);
                     @field(result, field) = try funcImpl(raw);
                 }
@@ -91,26 +92,26 @@ pub fn ParserForResultType(comptime ResultT: type) type {
 }
 
 // Parses value as base-10 (ten)
-pub inline fn parseInt(val: []const u8) ParseError!usize {
+pub inline fn parseInt(val: []const u8) ArgparseError!usize {
     return std.fmt.parseInt(usize, val, 10) catch {
-        return ParseError.InvalidFormat;
+        return ArgparseError.InvalidFormat;
     };
 }
 
 // Passthrough
-pub inline fn parseString(val: []const u8) ParseError![]const u8 {
+pub inline fn parseString(val: []const u8) ArgparseError![]const u8 {
     return val;
 }
 
 // Always true
-pub inline fn _true(_: []const u8)  ParseError!bool {
+pub inline fn _true(_: []const u8)  ArgparseError!bool {
     return true;
 }
 
 // Returns a function which returns error if string outside of provided bounds
-pub fn lengthedString(comptime min: usize, comptime max: usize) fn([]const u8)ParseError![]const u8 {
+pub fn lengthedString(comptime min: usize, comptime max: usize) fn([]const u8)ArgparseError![]const u8 {
     return struct {
-        pub fn func(val: []const u8) ParseError![]const u8 {
+        pub fn func(val: []const u8) ArgparseError![]const u8 {
             if(val.len < min) return error.LowerBoundBreach;
             if(val.len > max) return error.UpperBoundBreach;
             return val;
@@ -119,10 +120,10 @@ pub fn lengthedString(comptime min: usize, comptime max: usize) fn([]const u8)Pa
 }
 
 // Returns a function to parse the provided enum type
-pub fn parseEnum(comptime enum_type: type) fn ([]const u8) ParseError!enum_type {
+pub fn parseEnum(comptime enum_type: type) fn ([]const u8) ArgparseError!enum_type {
     return struct {
         fn func(raw: []const u8) !enum_type {
-            return std.meta.stringToEnum(enum_type, raw) orelse ParseError.InvalidFormat;
+            return std.meta.stringToEnum(enum_type, raw) orelse ArgparseError.InvalidValue;
         }
     }.func;
 }
@@ -153,9 +154,9 @@ pub fn enumValues(comptime enumType: type) []const u8 {
     }
 }
 
-pub fn constant(comptime value: anytype) fn([]const u8)ParseError!@TypeOf(value) {
+pub fn constant(comptime value: anytype) fn([]const u8)ArgparseError!@TypeOf(value) {
     return struct {
-        fn func(_: []const u8) ParseError!@TypeOf(value) {
+        fn func(_: []const u8) ArgparseError!@TypeOf(value) {
             return value;
         }
     }.func;
@@ -430,15 +431,15 @@ pub fn Argparse(comptime result_type: type) type {
             // Assume long starts with --, and derive fieldname from this. TODO: support override via param-struct.
             // Parser.createFieldParser will also verify that field exists in struct
 
-            var parser_func_ptr = try self.allocator.create(Parser.createFieldParser(field, parseFunc));
+            const parser_func_ptr = try self.allocator.create(Parser.createFieldParser(field, parseFunc));
             parser_func_ptr.* = .{};
 
             // If default-value provided; Generate a "parser" that always returns the default-value
-            var default_func_ptr = blk: {
+            const default_func_ptr = blk: {
                 if(params.default) |default| {
                     var ptr = try self.allocator.create(Parser.createFieldParser(field, constant(default)));
                     ptr.* = .{};
-                    break :blk ptr;
+                    break :blk @ptrCast(*Parser, ptr);
                 } else {
                     break :blk null;
                 }
@@ -447,7 +448,7 @@ pub fn Argparse(comptime result_type: type) type {
             try self.argument_list.put(field, .{
                 .arg_type = .param,
                 .parser = @ptrCast(*Parser, parser_func_ptr),
-                .default_provider = @ptrCast(*Parser, default_func_ptr),
+                .default_provider = default_func_ptr,
                 .long = long,
                 .help = help_text,
             });
@@ -611,14 +612,17 @@ test "argparse shall support optional arguments via default values" {
 
     try parser.param("--a", parseInt, "Optional argument, default=21", .{.default=21});
     
+
+    // Check for default
     var result: MyResult = undefined;
     try parser.conclude(&result, &.{}, std.io.getStdErr().writer());
     try testing.expect(result.a == 21);
 
+    // Check for specific
     try parser.conclude(&result, &.{"--a=84"}, std.io.getStdErr().writer());
     try testing.expect(result.a == 84);
-
 }
+
 // test "comptime all the way?" {
 //     Initiate the entire configuration in a comptime list/map, evaluated for completeness at comptime. Then only the actual parsing will finally be done runtime
 //     var parser = Argparse(Result).init(&.{

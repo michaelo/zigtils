@@ -21,8 +21,8 @@ pub fn main() !void {
     });
     defer parser.deinit();
 
-    try parser.param("--output", argparse.lengthedString(3,1024), "Specify file to write results to");
-    try parser.param("--loglevel", argparse.parseEnum(Loglevel), "Level of logging: " ++ argparse.enumValues(Loglevel));
+    try parser.param("--output", argparse.lengthedString(3,1024), "Specify file to write results to", .{});
+    try parser.param("--loglevel", argparse.parseEnum(Loglevel), "Level of logging: " ++ argparse.enumValues(Loglevel), .{.default=.NONE});
 
     // Get command-line argaments list
     // TODO: support using process.argsWithAllocator directly?
@@ -38,4 +38,5 @@ pub fn main() !void {
     };
 
     std.debug.print("We're good to go!\n", .{});
+    std.debug.print("  params: output={s}, loglevel={s}\n", .{args.output, @tagName(args.loglevel)});
 }
