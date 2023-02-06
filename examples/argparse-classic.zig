@@ -1,5 +1,5 @@
 const std = @import("std");
-const argparse = @import("../dyntest.zig");
+const argparse = @import("../argparse-classic.zig");
 
 const Loglevel = enum { ALL, NONE };
 

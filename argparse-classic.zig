@@ -1,156 +1,14 @@
-// STATUS: Work in progress, not functioning
 const std = @import("std");
 const testing = std.testing;
 const print = std.debug.print;
 
-const Severity = enum { all, critical };
-const Subcommand = enum { init, update };
-
-const string = []const u8;
-
-// TODO: How can I store the different type-parsers? By the -im approach with comptime handled functions this didn't require any storage. But for this approach this must be solved.
-//       Can we create an indexable register/lookup? Or pass in generator-functions with a known interface that returns the proper parsers?
-const Entry = struct {
-    result_type: type,
-    parser: ?fn(string)ParseError!@This().result_type,
-    long: ?[]const u8,
-    short: ?[]const u8,
-    help: []const u8,
+pub const ArgparseError = error{
+    NotFound,
+    InvalidFormat,
+    InvalidValue,
+    LowerBoundBreach,
+    UpperBoundBreach,
 };
-
-test "Entry" {
-    var entry = Entry{
-        .result_type = string,
-        .parser = parseString,
-        .long = "--key",
-        .short = "-k",
-        .help = "..."
-    };
-
-    try testing.expectEqualStrings("value", try entry.parser("value"));
-}
-
-test "parser list" {
-    
-}
-
-pub fn Argparse(comptime result_type: type, comptime title: []const u8, comptime config: struct { default_required: bool = true, subcommand_enum: ?type = null }) type {
-    _ = title;
-
-    return struct {
-        alloc: std.mem.Allocator,
-
-        const Self = @This();
-
-        pub fn init(alloc: std.mem.Allocator) Self {
-            return Self{ .alloc = alloc };
-        }
-
-        // If set: field for flag is considered 'true', otherwise 'false'
-        // flags are optional by design
-        pub fn flag(self: *Self, comptime long: string, comptime short: ?string, comptime help: string) void {
-            _ = self;
-            _ = long;
-            _ = short;
-            _ = help;
-        }
-
-        // Parameters differs from flags in that they have values which can be of arbitrary types and needs to be parsed accordingly.
-        // Params can be optional: default value can either be null or a predefined value of target data type
-        pub fn param(self: *Self, comptime parser: anytype, long: string, short: ?string, help: string,
-            param_config: struct {
-                required: bool = config.default_required,
-                default: ?coreTypeOf(returnTypeOf(parser)) = null
-            }
-        ) void {
-            _ = self;
-            _ = long;
-            _ = short;
-            _ = help;
-            _ = param_config;
-        }
-
-        pub fn subcommand(self: *Self, comptime key: string, comptime help: string) Self {
-            // TODO: comptime ensure key is parsable for enum
-            // _ = self;
-            _ = key;
-            _ = help;
-
-            return Self{
-                .alloc = self.alloc,
-            };
-        }
-
-        pub fn printHelp(self: *Self) void {
-            _ = self;
-        }
-
-        pub fn conclude(self: *Self, args: []const string) error{ missing_arguments, got_help }!result_type {
-            _ = self;
-            _ = args;
-
-            var result: result_type = undefined;
-            // Parse all registered params into result_type{}
-            // Is it possible to guarantee a well-defined target struct based on this? Or do we need to make all non-default argments nullable?
-            // TODO: Can we comptime create a routine that iterates over all struct-fields, and attempts setting them based on parse-results?
-            //       Will at least need to store all flag/param-entries comptime
-
-            // Use "long"-variant (required then) to map fields
-            //            optionally; provide a separate "field"-argument, but rather not
-            // Step 1: verify that all fields are configured
-
-            // Stop 2: parse args and
-            // result.verbose = false;
-
-            // TODO: in undefined-scenario: Ensure all fields are assigned/set
-            //       will put a lot of responsibility on this method to be thorough.
-            // return result_type{
-            //     .verbose = false,
-            //     .logsev = .all,
-            //     .subcommand = .{
-            //         .update = .{
-            //             .force = false
-            //         }
-            //     }
-            // };
-            return result;
-        }
-
-        pub fn deinit(self: *Self) void {
-            // cleanup
-            _ = self;
-        }
-    };
-}
-
-test "argparse shall parse flag and set corresponding field to true if found, otherwise false" {
-    const Type = struct { myflag: bool };
-    var parser = Argparse(Type, "app", .{}).init(testing.allocator);
-    parser.flag("--myflag", "-m", "...");
-    var result1 = try parser.conclude(&.{"--myflag"});
-    var result2 = try parser.conclude(&.{"--f"});
-    var result3 = try parser.conclude(&.{});
-
-    try testing.expect(result1.myflag);
-    try testing.expect(result2.myflag);
-    try testing.expect(!result3.myflag);
-}
-
-
-
-fn maybeOptional(comptime is_optional: bool, comptime return_type: type) type {
-    if (is_optional) {
-        return ?return_type;
-    } else {
-        return return_type;
-    }
-}
-
-fn returnTypeOf(comptime func: anytype) type {
-    const typeInfo = @typeInfo(@TypeOf(func));
-    if (typeInfo != .Fn) @compileError("Argument must be a function");
-    return typeInfo.Fn.return_type.?;
-}
 
 // Extract the actual data type, even given error unions or optionals
 fn coreTypeOf(comptime typevalue: type) type {
@@ -168,291 +26,615 @@ fn coreTypeOf(comptime typevalue: type) type {
     return coreType;
 }
 
-const Result = struct {
-    verbose: bool,
-    logsev: Severity,
+// Extract the return_type of a function. Results in compilation error if anything but a function is passed.
+fn returnTypeOf(comptime func: anytype) type {
+    const typeInfo = @typeInfo(@TypeOf(func));
+    if (typeInfo != .Fn) @compileError("Argument must be a function");
+    return typeInfo.Fn.return_type.?;
+}
 
-    // "Automagic" name?
-    subcommand: union(Subcommand) { init: struct {
-        force: bool,
-        file: []const u8,
-    }, update: struct { force: bool } },
-};
-
-const ParseError = error{
-    NotFound,
-    InvalidFormat,
-};
-
-fn enumParser(comptime enum_type: type) fn ([]const u8) ParseError!enum_type {
+// Creates a parser supertype, which will be derived into field/type-specific parsers using .createFieldParser
+// This allows us to register a set of parsers, regardless of their return-types and allows us (hopefully) type-safe
+// argument parsing later on.
+pub fn ParserForResultType(comptime ResultT: type) type {
     return struct {
-        fn func(raw: []const u8) !enum_type {
-            return std.meta.stringToEnum(enum_type, raw) orelse ParseError.InvalidFormat;
+        const Self = @This();
+        __v: *const VTable,
+        pub usingnamespace Methods(Self);
+
+        pub fn Methods(comptime T: type) type {
+            return extern struct {
+                pub inline fn parse(self: *const T, raw: []const u8, result: *ResultT) ArgparseError!void {
+                    try self.__v.parse(@ptrCast(*const ParserForResultType(ResultT), self), raw, result);
+                }
+            };
+        }
+
+        pub const VTable = extern struct {
+            parse: *const fn(self: *const ParserForResultType(ResultT), []const u8, *ResultT) ArgparseError!void,
+        };
+
+        // Creates a concrete parser for a particular field
+        pub fn createFieldParser(comptime field: []const u8, comptime funcImpl: anytype) type {
+            // Assert valid type-combo
+            comptime {
+                // Find field with corresponding name:
+                var structField = blk: inline for (@typeInfo(ResultT).Struct.fields) |f| {
+                    if(std.mem.eql(u8, field, f.name)) {
+                        break :blk f;
+                    }
+                } else {
+                    @compileError("no such field: " ++ @typeName(ResultT) ++ "." ++ field);
+                };
+
+                // Verify type-equality
+                const coreTypeOfFunc = coreTypeOf(returnTypeOf(funcImpl));
+                if(structField.type != coreTypeOfFunc) {
+                    @compileError("Incompatible types: field is " ++ @typeName(structField.type) ++ ", parse function returns " ++ @typeName(coreTypeOfFunc));
+                }
+            }
+
+            // Return the subtype
+            return struct {
+                usingnamespace Self.Methods(@This());
+                __v: *const Self.VTable = &vtable,
+
+                const vtable = Self.VTable {
+                    .parse = parseImpl,
+                };
+
+                pub fn parseImpl(iself: *const ParserForResultType(ResultT), raw: []const u8, result: *ResultT) ArgparseError!void {
+                    _ = @ptrCast(*const @This(), iself);
+                    @field(result, field) = try funcImpl(raw);
+                }
+            };
+        }
+    };
+}
+
+//////////////////////////////
+// Parsing helper-functions
+//////////////////////////////
+
+// Parses value as base-10 (ten)
+pub inline fn parseInt(val: []const u8) ArgparseError!usize {
+    return std.fmt.parseInt(usize, val, 10) catch {
+        return ArgparseError.InvalidFormat;
+    };
+}
+
+// Passthrough
+pub inline fn parseString(val: []const u8) ArgparseError![]const u8 {
+    return val;
+}
+
+// Always true
+pub inline fn _true(_: []const u8)  ArgparseError!bool {
+    return true;
+}
+
+// Returns a function which returns error if string outside of provided bounds
+pub fn lengthedString(comptime min: usize, comptime max: usize) fn([]const u8)ArgparseError![]const u8 {
+    return struct {
+        pub fn func(val: []const u8) ArgparseError![]const u8 {
+            if(val.len < min) return error.LowerBoundBreach;
+            if(val.len > max) return error.UpperBoundBreach;
+            return val;
         }
     }.func;
 }
 
-pub inline fn parseInt(val: []const u8) ParseError!usize {
-    return std.fmt.parseInt(usize, val, 10) catch {
-        return ParseError.InvalidFormat;
-    };
-}
-
-pub inline fn parseString(val: []const u8) ParseError![]const u8 {
-    return val;
-}
-
-test "exploration" {
-    var argparse = Argparse(Result, "MyApp v1.0.0", .{ .default_required = false, .subcommand_enum = Subcommand })
-        .init(testing.allocator);
-    defer argparse.deinit();
-
-    // Global flags
-    argparse.flag("--verbose", "-v", "Set verbose");
-    argparse.param(enumParser(Severity), "--logsev", null, "help me", .{ .default = .all });
-
-    // Subcommand: init
-    var sc_init = argparse.subcommand("init", "Initialize a new something");
-    sc_init.flag("--force", "-f", "Never stop initing");
-    sc_init.param(parseString, "--file", null, "Input-file", .{ .required = true });
-
-    // Subcommand: update
-    var sc_update = argparse.subcommand("update", "Update something");
-    sc_update.flag("--force", "-f", "Never stop updating");
-
-    // Upon errors; print errors + help, then abort
-    var result: Result = try argparse.conclude(&.{ "init", "--file=some.txt" });
-    _ = result;
-}
-
-test "typeplay" {
-    if (true) return error.SkipZigTest;
-
-    const MyType = struct { a: usize };
-
-    var a = MyType{ .a = 0 };
-
-    var b: MyType = blk: {
-        var result = .{
-            // .a = try parseInt("0"),
-        };
-        @field(result, "a") = 0;
-        break :blk result;
-    };
-
-    try testing.expectEqual(a.a, b.a);
-}
-
-
-test "field match" {
-    const Data = struct { fieldA: u8, fieldB: u8 };
-
-    var list = std.StringHashMap(u8).init(std.testing.allocator);
-    defer list.deinit();
-
-    try list.put("fieldA", 'A');
-    try list.put("fieldB", 'B');
-
-    var result: Data = undefined;
-
-    // Find if all the fields in the struct also exists in the list and set values
-    const info = @typeInfo(Data);
-    inline for (info.Struct.fields) |field| {
-        // print("{s}\n", .{field.name});
-        if (list.get(field.name)) |value| {
-            // print("got field\n", .{});
-            @field(result, field.name) = value;
-        } else {
-            // print("no such field\n", .{});
+// Returns a function to parse the provided enum type
+pub fn parseEnum(comptime enum_type: type) fn ([]const u8) ArgparseError!enum_type {
+    return struct {
+        fn func(raw: []const u8) !enum_type {
+            return std.meta.stringToEnum(enum_type, raw) orelse ArgparseError.InvalidValue;
         }
-    }
-
-    try testing.expectEqual(@as(u8, 'A'), result.fieldA);
-    try testing.expectEqual(@as(u8, 'B'), result.fieldB);
+    }.func;
 }
 
-// Simply check if all fields are defined in lookup_list, including for all permutations of unions
-// TBD: Shall it also evaluate that there are no _other_ definitions in lookup_list that does not exist?
-fn evaluate(comptime result_type: type, lookup_list: *const std.StringHashMap(u8), comptime prefix: []const u8) bool {
-    var result = true;
-    const info = @typeInfo(result_type);
+// Generate a comptime, comma-separated string of all values in an enum
+pub fn enumValues(comptime enumType: type) []const u8 {
+    comptime {
+        const typeInfo = @typeInfo(enumType).Enum;
 
-    inline for (info.Struct.fields) |field| {
-        switch(@typeInfo(field.type)) {
-            .Union => |value|{
-                inline for(value.fields) |union_field| {
-                    if(!evaluate(union_field.type, lookup_list, prefix ++ field.name ++ "." ++ union_field.name ++ ".")) {
-                        result = false;
+        // Get required len to be able to store all enum field-names
+        var required_len: usize = 0;
+        for(typeInfo.fields) |field| {
+            required_len += field.name.len+1; // incl trailing comma
+        }
+
+        // Generate comma-separated string of all enum field-names
+        var result: [required_len]u8 = undefined;
+        var len: usize = 0;
+
+        for(typeInfo.fields) |field| {
+            var added_chunk = field.name ++ ",";
+            std.mem.copy(u8, result[len..], added_chunk);
+            len += added_chunk.len;
+        }
+
+        // Trim trailing comma and return:
+        return result[0..len-1];
+    }
+}
+
+// Generates a function which always will return the specified value
+pub fn constant(comptime value: anytype) fn([]const u8)ArgparseError!@TypeOf(value) {
+    return struct {
+        fn func(_: []const u8) ArgparseError!@TypeOf(value) {
+            return value;
+        }
+    }.func;
+}
+
+const ArgumentType = enum { param, flag };
+
+fn ArgparseEntry(comptime result_type: type) type {
+    return struct {
+        arg_type: ArgumentType,
+        parser: *ParserForResultType(result_type),
+        default_provider: ?*ParserForResultType(result_type),
+        long: []const u8,
+        help: []const u8,
+        visited: bool = false, // Used to verify which fields we have processed
+    };
+}
+
+// Argparse - basic, type-safe argument parser.
+// The design goal is to provide a minimal-overhead solution with regards to amount of configuration required, while still 
+// resulting in a "safe" state if .conclude() succeeds. The main way to achieve this, from a user perspective, is that as
+// part of registering any argument, you will have to provide a parser-function which takes a "string" (slice of u8s) and
+// returns a value of correct type, matching the corresponding struct field identified by the long-form. Some default 
+// parsers, and parser-generators are provided; parseString, parseInt, parseEnum(enum_type), lengthedString(min,max)...
+// 
+// Att! when using .parseString to parse string-arguments, it will simply store the slice-reference, and thus require the 
+//      corresponding input argument to stay in the same memory as long as it's accessed. A solution to parse to array is 
+//      on the way (TODO)
+//
+// Supported features:
+//    flag: --longform
+//    parameter: --longform=value
+// 
+// Planned features:
+//    subcommand
+//    shortform flag and parameter: -s 
+//    positional arguments? TBD. Not a priority
+//    space-separated parameters in addition to =-separated? TBD. Not a priority.
+//
+// Main API:
+//   .init()
+//   .deinit()
+//   
+//   .param() - Register a new argument-config corresponding to a field in the destination struct. All fields in struct must be configured.
+//                 Currently, the long-form name of the argument must be 1:1 (without the dashes) with the corresponding struct-field.
+//   .flag() - Register a value-less parameter. Will set accociated field to true if passed, otherwise false.
+//   .conclude() - Ensures that all struct-fields have a matching argument-configuration, as well as executes all parsers.
+//                 If this succeeds, then you shall be safe that the result-struct is well-defined and ready to use.
+pub fn Argparse(comptime result_type: type) type {
+    return struct {
+        const Self = @This();
+        const Parser = ParserForResultType(result_type);
+
+        argument_list: std.StringHashMap(ArgparseEntry(result_type)),
+        visited_list: std.StringHashMap(bool),
+
+        allocator: std.mem.Allocator,
+        help_head: ?[]const u8,
+        help_tail: ?[]const u8,
+
+        pub fn init(allocator: std.mem.Allocator, init_params: struct {
+            help_head: ?[]const u8 = null,
+            help_tail: ?[]const u8 = null
+        }) Self {
+            return .{
+                .allocator = allocator,
+                .argument_list = std.StringHashMap(ArgparseEntry(result_type)).init(allocator),
+                .visited_list = std.StringHashMap(bool).init(allocator),
+                .help_head = init_params.help_head,
+                .help_tail = init_params.help_tail,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            var it = self.argument_list.valueIterator();
+            while(it.next()) |field| {
+                self.allocator.destroy(field.parser);
+                if(field.default_provider) |default| {
+                    self.allocator.destroy(default);
+                }
+            }
+
+            self.argument_list.deinit();
+            self.visited_list.deinit();
+        }
+
+        fn areAllFieldsConfigured(self: *Self, writer: anytype) bool {
+            var result = true;
+            const info = @typeInfo(result_type);
+        
+            inline for (info.Struct.fields) |field| {
+                switch(@typeInfo(field.type)) {
+                    .Union => {
+                        @compileError("Subcommands not yet supported");
+                        // inline for(value.fields) |union_field| {
+                        //     if(!evaluate(union_field.type, lookup_list, prefix ++ field.name ++ "." ++ union_field.name ++ ".")) {
+                        //         result = false;
+                        //     }
+                        // }
+                    },
+                    .Struct => {
+                        @compileError("Nonsensical. No logic idea of what structs should represent here.");
+                    },
+                    else => {
+                        if (self.argument_list.get(field.name) == null){
+                            // TODO: Can we solve this comptime? Assume we must pass the entire config-struct in one pass though.
+                            writer.print("error: Field {s}.{s} is not configured\n", .{@typeName(result_type), field.name}) catch {};
+                            result = false;
+                        }
                     }
                 }
-            },
-            else => {
-                if (lookup_list.get(prefix ++ field.name) == null){
-                    print("no such field: {s}\n", .{prefix ++ field.name});
-                    result = false;
-                }
             }
-        }
-    }
-
-
-    return result;
-}
-
-test "evaluate" {
-    const DataSubtype = enum {A,B};
-    const Data = struct {
-        fieldA: u8,
-        fieldB: u8,
-        sub: union(DataSubtype) {
-            A: struct {
-                aField: u8,
-            },
-            B: struct {
-                bField: u8
-            }
-        }
-    };
-    
-    var list = std.StringHashMap(u8).init(std.testing.allocator);
-    defer list.deinit();
-
-    try list.put("fieldA", 'A');
-    try list.put("fieldB", 'B');
-    try list.put("sub.A.aField", 'a');
-    try testing.expect(evaluate(Data, &list, "") == false);
-    try list.put("sub.B.bField", 'b');
-    try testing.expect(evaluate(Data, &list, ""));
-}
-
-fn parse(comptime result_type: type, lookup_list: *const std.StringHashMap(u8), comptime prefix: []const u8) !result_type {
-    // Iterate over args-list
-    // if start with -: check for flag
-    //  if followed by -: check for long flag
-    //  if followed by alphanum: check for short flag
-    //    for params: support both "--key=value" and "--key value"
-    // if shart with alphanum: check for subcommand
-    //   if subcommand: evaluate all following arguments as part of subcommand, not global. Recurse?
-    // TBD: Support positional arguments? 
-
-    
-
-    const info = @typeInfo(result_type);
-    var result: result_type = undefined;
-
-    // 1) Ensure all fields are defined
-    // 2) Lookup field values and set them - later replace this step with argparse-logic
-    // 3) If encounter union: recurse, add to prefix (incl ".")
-    inline for (info.Struct.fields) |field| {
-        switch(@typeInfo(field.type)) {
-            .Union => |value|{
-                // @field(result, field.name) = parse(field.type)
-                // TODO:
-                // 1: We need to evaluate that all fields are defined in list
-                // 2: We only want to set the one version that shall be active
-                inline for(value.fields) |union_field| {
-                    print(" -> unionfield {s}\n", .{union_field.name});
-                    print( " -> {any}\n", .{union_field});
-                }
-            },
-            else => {
-                if (lookup_list.get(prefix ++ field.name)) |value| {
-                    print("got field\n", .{});
-                    @field(result, field.name) = value;
-                } else {
-                    // print("no such field\n", .{});
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
-test "field defined advanced" {
-    const DataSubtype = enum {
-            A,B
-        };
-    const Data = struct {
-        fieldA: u8,
-        fieldB: u8,
-        sub: union(DataSubtype) {
-            A: struct {
-                aField: u8,
-            },
-            B: struct {
-                bField: u8
-            }
-        }
-    };
-
-    var list = std.StringHashMap(u8).init(std.testing.allocator);
-    defer list.deinit();
-
-    try list.put("fieldA", 'A');
-    try list.put("fieldB", 'B');
-    try list.put("sub.A.aField", 'a');
-    try list.put("sub.B.bField", 'b');
-
-    var result: Data = undefined;
-
-    // TODO: Wrap as function that returns a struct with fields evaluated (and eventually set), and upon encounters of unions; recurse
-    // Find if all the fields in the struct also exists in the list and set values
-    const info = @typeInfo(Data);
-    inline for (info.Struct.fields) |field| {
-        print("type: {any} - value: {any}\n", .{field.type, field.name});
-        switch(@typeInfo(field.type)) {
-            .Union => |value|{
-                // Step 1: for each subcommand variant; ensure there are configured up handlers
-                // Step 2: Verify that we are able to set the appropriate enum tag type
-
-                // print("{any}\n", .{value.fields});
-                inline for(value.fields) |union_field| {
-                    print(" -> unionfield {s}\n", .{union_field.name});
-                    print( " -> {any}\n", .{union_field});
-                }
-
-                // Fuck yeah!
-                var un = @unionInit(field.type, "A", undefined);
-                // @field(@field(un,"A"), "aField") = 'a';
-                @field(@field(un,"A"), "aField") = list.get(field.name ++ "." ++ "A" ++ "." ++ "aField").?;
-                @field(result, field.name) = un;
-                // @field(result, field.name)
-                // @field(result, field.name) = @unionInit(field.type, "A", .{.aField='a'});
-            },
-            //     print("{any}\n", .{value});
-            //     // print(" - {any}\n", .{@typeInfo(field.type)});
-            //     // inline for(field.type) |union_type| {
-            //     //     print(" - {any}\n", .{union_type});
-            //     // }
-            //     // print("union: {any}\n", .{unionType});
-            //     // inline for(unionType) |union_variant| {
-            //     //     print("variant: {any}\n", .{union_variant});
-            //     // }
-            //     // print("{any} {any}\n", .{field, @typeInfo(field.type)});
-            //     // TODO: Can I iterate over all variants of the tagged union?
-            // },
-            else => {
-                print("{any}\n", .{field});
-
-                if (list.get(field.name)) |value| {
-                    print("got field\n", .{});
-                    @field(result, field.name) = value;
-                } else {
-                    // print("no such field\n", .{});
-                }
-            }
-        }
-
         
-    }
-    // _ = result;
+            return result;
+        }
 
-    try testing.expectEqual(@as(u8, 'A'), result.fieldA);
-    try testing.expectEqual(@as(u8, 'B'), result.fieldB);
-    try testing.expectEqual(@as(u8, 'a'), result.sub.A.aField);
+        fn evaluateParam() void {
 
-    var result2 = try parse(Data, &list, "");
-    try testing.expectEqual(@as(u8, 'A'), result2.fieldA);
-    try testing.expectEqual(@as(u8, 'B'), result2.fieldB);
+        }
+
+        fn evaluateFlag() void {
+
+        }
+
+        pub fn conclude(self: *Self, result: *result_type, args: []const []const u8, writer: anytype) !void {
+            // Phase 1: Evaluate that all fields are configured
+            if(!self.areAllFieldsConfigured(writer)) return error.IncompleteConfiguration;
+
+            // Resetting visited-list
+            self.visited_list.clearAndFree();
+
+            // Phase 2: Attempt parse to result
+            for(args) |arg| {
+                if(arg.len < 3) {
+                    writer.print("error: invalid argument format. Expected '--argname', got {s}.\n", .{arg}) catch {};
+                    return error.InvalidFormat;
+                }
+                if(!std.mem.startsWith(u8, arg, "--")) {
+                    writer.print("error: invalid argument format. Should start with --, got {s}.\n", .{arg}) catch {};
+                    return error.InvalidFormat;
+                }
+
+                if(std.mem.eql(u8, arg, "--help")) {
+                    try self.printHelp(writer);
+                    return error.GotHelp;
+                }
+
+                // Check if flag or argument (has = or not)
+                if(std.mem.indexOf(u8, arg, "=")) |eql_idx| {
+                    var key = arg[2..eql_idx];
+                    var val = arg[eql_idx+1..];
+
+                    if(self.argument_list.get(key)) |field_def| {
+                        if(self.visited_list.get(key) != null) {
+                            writer.print("error: '{s}' already processed\n", .{key}) catch {};
+                            return error.InvalidFormat;
+                        }
+                        try self.visited_list.put(key, true);
+
+                        // Expect param-definiton
+                        if(field_def.arg_type != .param) {
+                            writer.print("error: got parameter-style for non-parameter '{s}'\n", .{key}) catch {};
+                            return error.InvalidFormat;
+                        }
+
+                        // 
+                        field_def.parser.parse(val, result) catch |e| {
+                            writer.print("error: got error parsing {s}-value '{s}': {s}\n", .{key,val, @errorName(e)}) catch {};
+                            return error.InvalidFormat;
+                        };
+                    } else {
+                        writer.print("error: argument '{s}' not supported.\n", .{key}) catch {};
+                        return error.NoSuchArgument;
+                    }
+                } else {
+                    // TODO: handle seems-to-be-flag
+                    var key = arg[2..];
+                    if(self.argument_list.get(key)) |field_def| {
+                        if(self.visited_list.get(key) != null) {
+                            writer.print("error: '{s}' already processed\n", .{key}) catch {};
+                            return error.InvalidFormat;
+                        }
+                        try self.visited_list.put(key, true);
+
+                        if(field_def.arg_type != .flag) {
+                            writer.print("error: got flag-style for non-flag '{s}'\n", .{key}) catch {};
+                            return error.InvalidFormat;
+                        }
+
+                        field_def.parser.parse("", result) catch |e| {
+                            writer.print("error: got error storing value for flag '{s}': {s}\n", .{key, @errorName(e)}) catch {};
+                            return error.InvalidFormat;
+                        };
+                        // TOOD: evaluate flag action
+                    } else {
+                        writer.print("error: argument '{s}' not supported.\n", .{key}) catch {};
+                        return error.NoSuchArgument;
+                    }
+                }
+            }
+
+            // Phase 3: check all unvisited, handle eventual defaults
+            const info = @typeInfo(result_type);
+        
+            inline for (info.Struct.fields) |field| {
+                switch(@typeInfo(field.type)) {
+                    .Union => {
+                        @compileError("Subcommands not yet supported");
+                    },
+                    .Struct => {
+                        @compileError("Nonsensical. No logic idea of what structs should represent here.");
+                    },
+                    else => {
+                        // Visited? (e.g. handled)
+                        if (self.visited_list.get(field.name) == null) {
+                            // Get entry, and evaluate optional/required and eventual default
+                            if (self.argument_list.get(field.name)) |arg_entry| {
+                                switch(arg_entry.arg_type) {
+                                    .flag => {
+                                        // Optional by design, set to false
+                                        // For some reason we have to check the type here, as seemingly all branches are evaluated during compile-time
+                                        if(@TypeOf(@field(result, field.name)) == bool) {
+                                            @field(result, field.name) = false;
+                                        }
+                                    },
+                                    .param => {
+                                        // Check for required or default
+                                        if(arg_entry.default_provider) |default_provider| {
+                                            // if provided default: set field to default
+                                            // @field(result, field.name) = default_value; <-- test this approach if we can store the actual type
+                                            try default_provider.parse("", result);
+                                        } else {
+                                            // if required: error
+                                            writer.print("error: missing required argument '{s}'\n", .{arg_entry.long}) catch {};
+                                            return error.InvalidFormat;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // TODO: Could we really solve this comptime? Assume we must pass the entire config-struct in one pass though.
+                                writer.print("error: Field {s}.{s} is not configured\n", .{@typeName(result_type), field.name}) catch {};
+                            }
+                        } else {
+                        }
+                    }
+                }
+            }
+        }
+
+        // TODO: pub fn argument() <- general variant backing both param() and flag()
+
+        // A parameter is an argument with a value (--key=value). If a default-value is provided in the params-struct, it will be considered optional.
+        pub fn param(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8, comptime params: struct {
+            default: ?coreTypeOf(returnTypeOf(parseFunc)) = null
+        }) !void {
+            if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
+            const field = long[2..];
+            
+            // Require 'long' to start with --, and derive fieldname from this. TBD: support override via param-struct to allow disconnected names.
+            // Parser.createFieldParser will also verify that field exists in struct
+
+            const parser_func_ptr = try self.allocator.create(Parser.createFieldParser(field, parseFunc));
+            parser_func_ptr.* = .{};
+
+            // If default-value provided; Generate a "parser" that always returns the default-value
+            const default_func_ptr = blk: {
+                if(params.default) |default| {
+                    var ptr = try self.allocator.create(Parser.createFieldParser(field, constant(default)));
+                    ptr.* = .{};
+                    break :blk @ptrCast(*Parser, ptr);
+                } else {
+                    break :blk null;
+                }
+            };
+
+            try self.argument_list.put(field, .{
+                .arg_type = .param,
+                .parser = @ptrCast(*Parser, parser_func_ptr),
+                .default_provider = default_func_ptr,
+                .long = long,
+                .help = help_text,
+            });
+        }
+
+        // A flag is an argument without a value. If provided, the corresponding field will be set to true, otherwise to false.
+        // It is by convention optional.
+        pub fn flag(self: *Self, comptime long: []const u8, comptime help_text: []const u8) !void {
+            if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
+            const field = long[2..];
+
+            const field_parser_type = Parser.createFieldParser(field, _true);
+
+            var ptr = try self.allocator.create(field_parser_type);
+            ptr.* = .{};
+
+            try self.argument_list.put(field, .{
+                .arg_type = .flag,
+                .parser = @ptrCast(*Parser, ptr),
+                .default_provider = null,
+                .long = long,
+                .help = help_text,
+            });
+        }
+
+        // Prints a pretty-formatted help of all the registered params and flags
+        pub fn printHelp(self: *Self, writer: anytype) !void {
+            if(!self.areAllFieldsConfigured(writer)) return error.IncompleteDefinition;
+
+
+            if(self.help_head) |text| writer.print("{s}\n", .{text}) catch {};
+
+            // List all arguments
+            if(self.argument_list.count() > 0) {
+
+                var it = self.argument_list.iterator();
+                writer.print("\nArguments/flags:\n", .{}) catch {};
+
+                // TODO: Pretty-align. Ordered? Split by param/flag?
+                while(it.next()) |field| {
+                    switch(field.value_ptr.arg_type) {
+                        .param => {
+                            writer.print("  {s}=<val>\t{s}\n", .{field.value_ptr.long, field.value_ptr.help}) catch {};
+                        },
+                        .flag => {
+                            writer.print("  {s}\t{s}\n", .{field.value_ptr.long, field.value_ptr.help}) catch {};
+                        }
+                    }
+                }
+
+                writer.print("\n", .{}) catch {};
+            }
+
+            if(self.help_tail) |text| writer.print("{s}\n", .{text}) catch {};
+        }
+    };
 }
+
+test "argparse shall support arbitrary argument types" {
+    const Result = struct { a: usize, b: []const u8 };
+    var parser = Argparse(Result).init(std.testing.allocator, .{});
+    defer parser.deinit();
+
+    try parser.param("--a", parseInt, "", .{});
+    try parser.param("--b", parseString, "", .{});
+
+    var result: Result = undefined;
+    try parser.conclude(&result, &.{"--a=123", "--b=321"}, std.io.getStdErr().writer());
+    try testing.expect(result.a == 123);
+    try testing.expectEqualStrings("321", result.b);
+}
+
+const mtest = @import("mtest.zig");
+
+test "argparse.printHelp() shall print head and tail text, if provided" {
+    const MyResult = struct {};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{
+        .help_head = "MyApp v1.0",
+        .help_tail = "(c) Michael Odden"
+    });
+    defer parser.deinit();
+
+    var output_buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_buf.deinit();
+
+    try parser.printHelp(output_buf.writer());
+
+    try mtest.expectStringContains(output_buf.items, "MyApp v1.0");
+    try mtest.expectStringContains(output_buf.items, "(c) Michael Odden");
+}
+
+test "argparse.printHelp() shall print help-text for all params" {
+    const MyResult = struct {a: usize};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{
+        .help_head = "MyApp v1.0",
+        .help_tail = "(c) Michael Odden"
+    });
+    defer parser.deinit();
+
+    var output_buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_buf.deinit();
+
+    try parser.param("--a", parseInt, "help text for 'a'", .{});
+
+    try parser.printHelp(output_buf.writer());
+
+    try mtest.expectStringContains(output_buf.items, "--a");
+    try mtest.expectStringContains(output_buf.items, "help text for 'a'");
+}
+
+test "argparse given '--help' shall show help and abort evaluation" {
+    const MyResult = struct {};
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{.help_head="Help-test"});
+    defer parser.deinit();
+
+    var output_buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_buf.deinit();
+
+    var result: MyResult = undefined;
+    try testing.expectError(error.GotHelp, parser.conclude(&result, &.{"--help"}, output_buf.writer()));
+
+    try mtest.expectStringContains(output_buf.items, "Help-test");
+}
+
+test "argparse shall support value-less bool-backed parameters, i.e. flags. True if set, otherwise false." {
+    // Initiate
+    const MyResult = struct {myflag: bool};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{});
+    defer parser.deinit();
+
+    try parser.flag("--myflag", "flag goes here");
+
+
+    // Evaluate
+    var result: MyResult = undefined;
+
+    // Test without flag
+    try parser.conclude(&result, &.{}, std.io.getStdErr().writer());
+    try testing.expect(!result.myflag);
+
+    // Test with flag
+    try parser.conclude(&result, &.{"--myflag"}, std.io.getStdErr().writer());
+    try testing.expect(result.myflag);
+
+    // Test without flag
+    try parser.conclude(&result, &.{}, std.io.getStdErr().writer());
+    try testing.expect(!result.myflag);
+}
+
+test "argparse shall support enums" {
+    const Severity = enum { INFO, WARNING, ERROR };
+    const MyResult = struct {severity: Severity};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{});
+    defer parser.deinit();
+
+    try parser.param("--severity", parseEnum(Severity), "Valid values=" ++ enumValues(Severity), .{});
+
+    var result: MyResult = undefined;
+    try parser.conclude(&result, &.{"--severity=WARNING"}, std.io.getStdErr().writer());
+
+    try testing.expect(result.severity == .WARNING);
+}
+
+test "argparse shall support optional arguments via default values" {
+    const MyResult = struct {a: usize};
+
+    var parser = Argparse(MyResult).init(std.testing.allocator, .{});
+    defer parser.deinit();
+
+    try parser.param("--a", parseInt, "Optional argument, default=21", .{.default=21});
+    
+
+    // Check for default
+    var result: MyResult = undefined;
+    try parser.conclude(&result, &.{}, std.io.getStdErr().writer());
+    try testing.expect(result.a == 21);
+
+    // Check for specific
+    try parser.conclude(&result, &.{"--a=84"}, std.io.getStdErr().writer());
+    try testing.expect(result.a == 84);
+}
+
+// test "comptime all the way?" {
+//     Initiate the entire configuration in a comptime list/map, evaluated for completeness at comptime. Then only the actual parsing will finally be done runtime
+//     var parser = Argparse(Result).init(&.{
+//         .{}
+//     });
+// }
+
+// Plan:
+// Incorporate this into argparse, which will handle allocations, and final evaluations
+// ... including verifications that all fields are configured at time of .conclude()
