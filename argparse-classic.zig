@@ -10,7 +10,7 @@ pub const ArgparseError = error{
     UpperBoundBreach,
 };
 
-// Extract the actual data type, even given error unions or optionals
+/// Extract the actual data type, even given error unions or optionals
 fn coreTypeOf(comptime typevalue: type) type {
     var typeInfo = @typeInfo(typevalue);
     return switch (typeInfo) {
@@ -27,7 +27,7 @@ test "coreTypeOf" {
     try testing.expectEqual(usize, coreTypeOf(ArgparseError!?usize));
 }
 
-// Extract the return_type of a function. Results in compilation error if anything but a function is passed.
+/// Extract the return_type of a function. Results in compilation error if anything but a function is passed.
 fn returnTypeOf(comptime func: anytype) type {
     const typeInfo = @typeInfo(@TypeOf(func));
     if (typeInfo != .Fn) @compileError("Argument must be a function");
@@ -38,9 +38,9 @@ test "returnTypeOf" {
     try testing.expectEqual(type, returnTypeOf(returnTypeOf));
 }
 
-// Creates a parser supertype, which will be derived into field/type-specific parsers using .createFieldParser
-// This allows us to register a set of parsers, regardless of their return-types and allows us (hopefully) type-safe
-// argument parsing later on.
+/// Creates a parser supertype, which will be derived into field/type-specific parsers using .createFieldParser
+/// This allows us to register a set of parsers, regardless of their return-types and allows us (hopefully) type-safe
+/// argument parsing later on.
 pub fn ParserForResultType(comptime ResultT: type) type {
     return struct {
         const Self = @This();
@@ -101,24 +101,24 @@ pub fn ParserForResultType(comptime ResultT: type) type {
 // Parsing helper-functions
 //////////////////////////////
 
-// Parses value as base-10 (ten)
+/// Parses value as base-10 (ten)
 pub inline fn parseInt(val: []const u8) ArgparseError!usize {
     return std.fmt.parseInt(usize, val, 10) catch {
         return ArgparseError.InvalidFormat;
     };
 }
 
-// Passthrough
+/// Passthrough
 pub inline fn parseString(val: []const u8) ArgparseError![]const u8 {
     return val;
 }
 
-// Always true
+/// Always true
 pub inline fn _true(_: []const u8) ArgparseError!bool {
     return true;
 }
 
-// Returns a function which returns error if string outside of provided bounds
+/// Returns a function which returns error if string outside of provided bounds
 pub fn lengthedString(comptime min: usize, comptime max: usize) fn ([]const u8) ArgparseError![]const u8 {
     return struct {
         pub fn func(val: []const u8) ArgparseError![]const u8 {
@@ -129,7 +129,7 @@ pub fn lengthedString(comptime min: usize, comptime max: usize) fn ([]const u8) 
     }.func;
 }
 
-// Returns a function to parse the provided enum type
+/// Returns a function to parse the provided enum type
 pub fn parseEnum(comptime enum_type: type) fn ([]const u8) ArgparseError!enum_type {
     return struct {
         fn func(raw: []const u8) !enum_type {
@@ -138,7 +138,7 @@ pub fn parseEnum(comptime enum_type: type) fn ([]const u8) ArgparseError!enum_ty
     }.func;
 }
 
-// Generate a comptime, comma-separated string of all values in an enum
+/// Generate a comptime, comma-separated string of all values in an enum
 pub fn enumValues(comptime enumType: type) []const u8 {
     comptime {
         const typeInfo = @typeInfo(enumType).Enum;
@@ -164,7 +164,7 @@ pub fn enumValues(comptime enumType: type) []const u8 {
     }
 }
 
-// Generates a function which always will return the specified value
+/// Generates a function which always will return the specified value
 pub fn constant(comptime value: anytype) fn ([]const u8) ArgparseError!@TypeOf(value) {
     return struct {
         fn func(_: []const u8) ArgparseError!@TypeOf(value) {
@@ -186,36 +186,36 @@ fn ArgparseEntry(comptime result_type: type) type {
     };
 }
 
-// Argparse - basic, type-safe argument parser.
-// The design goal is to provide a minimal-overhead solution with regards to amount of configuration required, while still
-// resulting in a "safe" state if .conclude() succeeds. The main way to achieve this, from a user perspective, is that as
-// part of registering any argument, you will have to provide a parser-function which takes a "string" (slice of u8s) and
-// returns a value of correct type, matching the corresponding struct field identified by the long-form. Some default
-// parsers, and parser-generators are provided; parseString, parseInt, parseEnum(enum_type), lengthedString(min,max)...
-//
-// Att! when using .parseString to parse string-arguments, it will simply store the slice-reference, and thus require the
-//      corresponding input argument to stay in the same memory as long as it's accessed. A solution to parse to array is
-//      on the way (TODO)
-//
-// Supported features:
-//    flag: --longform
-//    parameter: --longform=value
-//
-// Planned features:
-//    subcommand
-//    shortform flag and parameter: -s
-//    positional arguments? TBD. Not a priority
-//    space-separated parameters in addition to =-separated? TBD. Not a priority.
-//
-// Main API:
-//   .init()
-//   .deinit()
-//
-//   .param() - Register a new argument-config corresponding to a field in the destination struct. All fields in struct must be configured.
-//                 Currently, the long-form name of the argument must be 1:1 (without the dashes) with the corresponding struct-field.
-//   .flag() - Register a value-less parameter. Will set accociated field to true if passed, otherwise false.
-//   .conclude() - Ensures that all struct-fields have a matching argument-configuration, as well as executes all parsers.
-//                 If this succeeds, then you shall be safe that the result-struct is well-defined and ready to use.
+/// Argparse - basic, type-safe argument parser.
+/// The design goal is to provide a minimal-overhead solution with regards to amount of configuration required, while still
+/// resulting in a "safe" state if .conclude() succeeds. The main way to achieve this, from a user perspective, is that as
+/// part of registering any argument, you will have to provide a parser-function which takes a "string" (slice of u8s) and
+/// returns a value of correct type, matching the corresponding struct field identified by the long-form. Some default
+/// parsers, and parser-generators are provided; parseString, parseInt, parseEnum(enum_type), lengthedString(min,max)...
+///
+/// Att! when using .parseString to parse string-arguments, it will simply store the slice-reference, and thus require the
+///      corresponding input argument to stay in the same memory as long as it's accessed. A solution to parse to array is
+///      on the way (TODO)
+///
+/// Supported features:
+///    flag: --longform
+///    parameter: --longform=value
+///
+/// Planned features:
+///    subcommand
+///    shortform flag and parameter: -s
+///    positional arguments? TBD. Not a priority
+///    space-separated parameters in addition to =-separated? TBD. Not a priority.
+///
+/// Main API:
+///   .init()
+///   .deinit()
+///
+///   .param() - Register a new argument-config corresponding to a field in the destination struct. All fields in struct must be configured.
+///                 Currently, the long-form name of the argument must be 1:1 (without the dashes) with the corresponding struct-field.
+///   .flag() - Register a value-less parameter. Will set accociated field to true if passed, otherwise false.
+///   .conclude() - Ensures that all struct-fields have a matching argument-configuration, as well as executes all parsers.
+///                 If this succeeds, then you shall be safe that the result-struct is well-defined and ready to use.
 pub fn Argparse(comptime result_type: type) type {
     return struct {
         const Self = @This();
