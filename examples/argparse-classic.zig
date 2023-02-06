@@ -5,7 +5,8 @@ const Loglevel = enum { ALL, NONE };
 
 const MyArgs = struct {
     output: []const u8,
-    loglevel: Loglevel
+    loglevel: Loglevel,
+    force: bool,
 };
 
 pub fn main() !void {
@@ -23,6 +24,7 @@ pub fn main() !void {
 
     try parser.param("--output", argparse.lengthedString(3,1024), "Specify file to write results to", .{});
     try parser.param("--loglevel", argparse.parseEnum(Loglevel), "Level of logging: " ++ argparse.enumValues(Loglevel), .{.default=.NONE});
+    try parser.flag("--force", "Will never give up!");
 
     // Get command-line argaments list
     // TODO: support using process.argsWithAllocator directly?
@@ -38,5 +40,5 @@ pub fn main() !void {
     };
 
     std.debug.print("We're good to go!\n", .{});
-    std.debug.print("  params: output={s}, loglevel={s}\n", .{args.output, @tagName(args.loglevel)});
+    std.debug.print("  params: output={s}, loglevel={s}, force={}\n", .{args.output, @tagName(args.loglevel), args.force});
 }

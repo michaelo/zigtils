@@ -26,6 +26,7 @@ fn coreTypeOf(comptime typevalue: type) type {
     return coreType;
 }
 
+// Extract the return_type of a function. Results in compilation error if anything but a function is passed.
 fn returnTypeOf(comptime func: anytype) type {
     const typeInfo = @typeInfo(@TypeOf(func));
     if (typeInfo != .Fn) @compileError("Argument must be a function");
@@ -91,6 +92,10 @@ pub fn ParserForResultType(comptime ResultT: type) type {
     };
 }
 
+//////////////////////////////
+// Parsing helper-functions
+//////////////////////////////
+
 // Parses value as base-10 (ten)
 pub inline fn parseInt(val: []const u8) ArgparseError!usize {
     return std.fmt.parseInt(usize, val, 10) catch {
@@ -154,6 +159,7 @@ pub fn enumValues(comptime enumType: type) []const u8 {
     }
 }
 
+// Generates a function which always will return the specified value
 pub fn constant(comptime value: anytype) fn([]const u8)ArgparseError!@TypeOf(value) {
     return struct {
         fn func(_: []const u8) ArgparseError!@TypeOf(value) {
@@ -177,7 +183,10 @@ fn ArgparseEntry(comptime result_type: type) type {
 
 // Argparse - basic, type-safe argument parser.
 // The design goal is to provide a minimal-overhead solution with regards to amount of configuration required, while still 
-// resulting in a "safe" state if .conclude() succeeds.
+// resulting in a "safe" state if .conclude() succeeds. The main way to achieve this, from a user perspective, is that as
+// part of registering any argument, you will have to provide a parser-function which takes a "string" (slice of u8s) and
+// returns a value of correct type, matching the corresponding struct field identified by the long-form. Some default 
+// parsers, and parser-generators are provided; parseString, parseInt, parseEnum(enum_type), lengthedString(min,max)...
 // 
 // Att! when using .parseString to parse string-arguments, it will simply store the slice-reference, and thus require the 
 //      corresponding input argument to stay in the same memory as long as it's accessed. A solution to parse to array is 
@@ -197,8 +206,9 @@ fn ArgparseEntry(comptime result_type: type) type {
 //   .init()
 //   .deinit()
 //   
-//   .param() - Register a new argument-config corresponding to a field in the destination struct. All fields in struct must be configure, .{}d.
+//   .param() - Register a new argument-config corresponding to a field in the destination struct. All fields in struct must be configured.
 //                 Currently, the long-form name of the argument must be 1:1 (without the dashes) with the corresponding struct-field.
+//   .flag() - Register a value-less parameter. Will set accociated field to true if passed, otherwise false.
 //   .conclude() - Ensures that all struct-fields have a matching argument-configuration, as well as executes all parsers.
 //                 If this succeeds, then you shall be safe that the result-struct is well-defined and ready to use.
 pub fn Argparse(comptime result_type: type) type {
@@ -355,22 +365,6 @@ pub fn Argparse(comptime result_type: type) type {
             }
 
             // Phase 3: check all unvisited, handle eventual defaults
-            // TODO: Iterate struct fields, comptime!
-            // var it = self.argument_list.iterator();
-            // while(it.next()) |entry| {
-            //     if(self.visited_list.get(entry.key_ptr.*) != null) continue;
-
-            //     // TODO: How can we assign default-values to fields? Shall we rather iterate the struct comptime here, rather than argument_list? Yes!
-            //     switch(entry.value_ptr.arg_type) {
-            //         .flag => {
-            //             // Optional by design, set to false
-            //         },
-            //         .param => {
-            //             // Check for required or default
-            //         }
-            //     }
-            // }
-
             const info = @typeInfo(result_type);
         
             inline for (info.Struct.fields) |field| {
@@ -397,18 +391,18 @@ pub fn Argparse(comptime result_type: type) type {
                                     .param => {
                                         // Check for required or default
                                         if(arg_entry.default_provider) |default_provider| {
+                                            // if provided default: set field to default
                                             // @field(result, field.name) = default_value; <-- test this approach if we can store the actual type
                                             try default_provider.parse("", result);
                                         } else {
+                                            // if required: error
                                             writer.print("error: missing required argument '{s}'\n", .{arg_entry.long}) catch {};
                                             return error.InvalidFormat;
                                         }
-                                        // if required: error
-                                        // if default: set default
                                     }
                                 }
                             } else {
-                                // TODO: Can we solve this comptime? Assume we must pass the entire config-struct in one pass though.
+                                // TODO: Could we really solve this comptime? Assume we must pass the entire config-struct in one pass though.
                                 writer.print("error: Field {s}.{s} is not configured\n", .{@typeName(result_type), field.name}) catch {};
                             }
                         } else {
@@ -420,15 +414,14 @@ pub fn Argparse(comptime result_type: type) type {
 
         // TODO: pub fn argument() <- general variant backing both param() and flag()
 
-        // Main function to configure params to check for.
-        // TODO: Have parseFunc be optional, and look up based on field-type?
+        // A parameter is an argument with a value (--key=value). If a default-value is provided in the params-struct, it will be considered optional.
         pub fn param(self: *Self, comptime long: []const u8, comptime parseFunc: anytype, comptime help_text: []const u8, comptime params: struct {
             default: ?coreTypeOf(returnTypeOf(parseFunc)) = null
         }) !void {
             if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
             const field = long[2..];
             
-            // Assume long starts with --, and derive fieldname from this. TODO: support override via param-struct.
+            // Require 'long' to start with --, and derive fieldname from this. TBD: support override via param-struct to allow disconnected names.
             // Parser.createFieldParser will also verify that field exists in struct
 
             const parser_func_ptr = try self.allocator.create(Parser.createFieldParser(field, parseFunc));
@@ -454,6 +447,8 @@ pub fn Argparse(comptime result_type: type) type {
             });
         }
 
+        // A flag is an argument without a value. If provided, the corresponding field will be set to true, otherwise to false.
+        // It is by convention optional.
         pub fn flag(self: *Self, comptime long: []const u8, comptime help_text: []const u8) !void {
             if(!(long[0] == '-' and long[1] == '-')) @compileError("Invalid argument format. It must start with '--'. Found: " ++ long);
             const field = long[2..];
@@ -472,6 +467,7 @@ pub fn Argparse(comptime result_type: type) type {
             });
         }
 
+        // Prints a pretty-formatted help of all the registered params and flags
         pub fn printHelp(self: *Self, writer: anytype) !void {
             if(!self.areAllFieldsConfigured(writer)) return error.IncompleteDefinition;
 
@@ -480,11 +476,20 @@ pub fn Argparse(comptime result_type: type) type {
 
             // List all arguments
             if(self.argument_list.count() > 0) {
-                var it = self.argument_list.iterator();
-                writer.print("\nArguments:\n", .{}) catch {};
 
+                var it = self.argument_list.iterator();
+                writer.print("\nArguments/flags:\n", .{}) catch {};
+
+                // TODO: Pretty-align. Ordered? Split by param/flag?
                 while(it.next()) |field| {
-                    writer.print("  {s}=<val> {s}\n", .{field.value_ptr.long, field.value_ptr.help}) catch {};
+                    switch(field.value_ptr.arg_type) {
+                        .param => {
+                            writer.print("  {s}=<val>\t{s}\n", .{field.value_ptr.long, field.value_ptr.help}) catch {};
+                        },
+                        .flag => {
+                            writer.print("  {s}\t{s}\n", .{field.value_ptr.long, field.value_ptr.help}) catch {};
+                        }
+                    }
                 }
 
                 writer.print("\n", .{}) catch {};
