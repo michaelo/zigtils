@@ -207,6 +207,7 @@ fn ArgparseEntry(comptime result_type: type) type {
 ///    shortform flag and parameter: -s
 ///    positional arguments? TBD. Not a priority
 ///    space-separated parameters in addition to =-separated? TBD. Not a priority.
+///    Formalize default-value presentation in help
 ///
 /// Main API:
 ///   .init()
@@ -217,6 +218,10 @@ fn ArgparseEntry(comptime result_type: type) type {
 ///   .flag() - Register a value-less parameter. Will set accociated field to true if passed, otherwise false.
 ///   .conclude() - Ensures that all struct-fields have a matching argument-configuration, as well as executes all parsers.
 ///                 If this succeeds, then you shall be safe that the result-struct is well-defined and ready to use.
+///
+/// Concepts to explore: 
+///   Initiate the entire argument_list comptime. Either using comptime-block for population, or devising an inline-structure that can be passed as a whole.
+/// 
 pub fn Argparse(comptime result_type: type) type {
     return struct {
         const Self = @This();
@@ -428,25 +433,30 @@ pub fn Argparse(comptime result_type: type) type {
 
         // Prints a pretty-formatted help of all the registered params and flags
         pub fn printHelp(self: *Self, writer: anytype) !void {
-            // if (!self.areAllFieldsConfigured(writer)) return error.IncompleteDefinition;
-
             if (self.help_head) |text| writer.print("{s}\n", .{text}) catch {};
+
+
 
             // List all arguments
             if (self.argument_list.count() > 0) {
-                var it = self.argument_list.iterator();
                 writer.print("\nArguments/flags:\n", .{}) catch {};
 
-                // TODO: Pretty-align. Ordered? Split by param/flag?
+                // TODO: Ordered? Split by param/flag?
+                var scrap = try std.BoundedArray(u8, 128).init(0);
+                var scrapwriter = scrap.writer();
+
+                var it = self.argument_list.iterator();
                 while (it.next()) |field| {
+                    scrap.resize(0) catch {}; // resizing to 0 can't fail.
+                    _ = scrapwriter.write(field.value_ptr.long) catch {};
+                    
                     switch (field.value_ptr.arg_type) {
                         .param => {
-                            writer.print("  {s}=<val>\t{s}\n", .{ field.value_ptr.long, field.value_ptr.help }) catch {};
+                            _ = scrapwriter.write("=<val>") catch {};
                         },
-                        .flag => {
-                            writer.print("  {s}\t{s}\n", .{ field.value_ptr.long, field.value_ptr.help }) catch {};
-                        },
+                        .flag => {},
                     }
+                    writer.print("  {s:<18} {s}\n", .{ scrap.slice(), field.value_ptr.help }) catch {};
                 }
 
                 writer.print("\n", .{}) catch {};
