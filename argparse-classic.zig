@@ -109,6 +109,12 @@ pub inline fn parseInt(val: []const u8) ArgparseError!usize {
     };
 }
 
+pub inline fn parseFloat(val: []const u8) ArgparseError!f64 {
+    return std.fmt.parseFloat(f64, val) catch {
+        return ArgparseError.InvalidFormat;
+    };
+}
+
 /// Passthrough
 pub inline fn parseString(val: []const u8) ArgparseError![]const u8 {
     return val;
@@ -435,7 +441,29 @@ pub fn Argparse(comptime result_type: type) type {
         pub fn printHelp(self: *Self, writer: anytype) !void {
             if (self.help_head) |text| writer.print("{s}\n", .{text}) catch {};
 
+            // Print usage-example:
+            writer.print("\nUsage: \n", .{}) catch {};
+            writer.print("waxels ", .{}) catch {};
+            if (self.argument_list.count() > 0) {
+                // All required parameters
+                var it = self.argument_list.iterator();
+                while (it.next()) |field| if (field.value_ptr.arg_type == .param and field.value_ptr.default_provider == null) {
+                    print("{s}=... ", .{field.value_ptr.long});
+                };
 
+                // All optional parameters (has defaults)
+                it = self.argument_list.iterator();
+                while (it.next()) |field| if (field.value_ptr.arg_type == .param and field.value_ptr.default_provider != null) {
+                    print("[{s}=...] ", .{field.value_ptr.long});
+                };
+
+                // All flags
+                it = self.argument_list.iterator();
+                while (it.next()) |field| if (field.value_ptr.arg_type == .flag) {
+                    print("[{s}] ", .{field.value_ptr.long});
+                };
+            }
+            writer.print("\n", .{}) catch {};
 
             // List all arguments
             if (self.argument_list.count() > 0) {
