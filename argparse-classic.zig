@@ -187,6 +187,7 @@ fn ArgparseEntry(comptime result_type: type) type {
         arg_type: ArgumentType,
         parser: *ParserForResultType(result_type),
         default_provider: ?*ParserForResultType(result_type),
+        default_string: ?[]const u8 = null, // A pregenerated string-representation to be used in printHelp
         long: []const u8,
         help: []const u8,
         visited: bool = false, // Used to verify which fields we have processed
@@ -398,6 +399,13 @@ pub fn Argparse(comptime result_type: type) type {
             const parser_func_ptr = try self.allocator.create(Parser.createFieldParser(field, parseFunc));
             parser_func_ptr.* = .{};
 
+            var default_string: ?[]const u8 = null;
+            comptime {
+                if (params.default) |default| {
+                    default_string = comptimeValueString(default);
+                }
+            }
+
             // If default-value provided; Generate a "parser" that always returns the default-value
             const default_func_ptr = blk: {
                 if (params.default) |default| {
@@ -413,6 +421,7 @@ pub fn Argparse(comptime result_type: type) type {
                 .arg_type = .param,
                 .parser = @ptrCast(*Parser, parser_func_ptr),
                 .default_provider = default_func_ptr,
+                .default_string = default_string,
                 .long = long,
                 .help = help_text,
             });
@@ -484,7 +493,13 @@ pub fn Argparse(comptime result_type: type) type {
                         },
                         .flag => {},
                     }
-                    writer.print("  {s:<18} {s}\n", .{ scrap.slice(), field.value_ptr.help }) catch {};
+                    writer.print("  {s:<18} {s}", .{ scrap.slice(), field.value_ptr.help }) catch {};
+                    
+                    if(field.value_ptr.default_string) |default| {
+                        writer.print(" (default={s})", .{default}) catch {};
+                    }
+
+                    writer.print("\n", .{}) catch {};
                 }
 
                 writer.print("\n", .{}) catch {};
@@ -619,6 +634,25 @@ test "argparse shall support optional arguments via default values" {
     // Check for specific
     try parser.conclude(&result, &.{"--a=84"}, std.io.getStdErr().writer());
     try testing.expect(result.a == 84);
+}
+
+fn comptimeValueString(comptime value: anytype) []const u8 {
+    const typeOf = @TypeOf(value);
+    const typeInfo = @typeInfo(typeOf);
+
+    return switch(typeInfo) {
+        .ComptimeInt, .Int, .Float => std.fmt.comptimePrint("{d}", .{value}),
+        .EnumLiteral, .Enum => std.fmt.comptimePrint("{s}", .{@tagName(value)}),
+        else => std.fmt.comptimePrint("{s}", .{value}),
+    };
+}
+
+test "valueString" {
+    _ = comptimeValueString(1);
+    _ = comptimeValueString(@as(usize, 2));
+    _ = comptimeValueString(@as(f64, 3.123));
+    _ = comptimeValueString("value");
+    _ = comptimeValueString(.val1);
 }
 
 // test "comptime all the way?" {
