@@ -274,11 +274,11 @@ pub fn Argparse(comptime result_type: type) type {
             self.visited_list.clearAndFree();
             for (args) |arg| {
                 if (arg.len < 3) {
-                    writer.print("error: invalid argument format. Expected '--argname', got {s}.\n", .{arg}) catch {};
+                    writer.print("error: invalid argument format. Expected '--<argname>', got '{s}'.\n", .{arg}) catch {};
                     return error.InvalidFormat;
                 }
                 if (!std.mem.startsWith(u8, arg, "--")) {
-                    writer.print("error: invalid argument format. Should start with --, got {s}.\n", .{arg}) catch {};
+                    writer.print("error: invalid argument format. Should start with '--', got '{s}'.\n", .{arg}) catch {};
                     return error.InvalidFormat;
                 }
 
@@ -342,6 +342,8 @@ pub fn Argparse(comptime result_type: type) type {
             // Phase 2: check all unvisited, handle eventual defaults. Will also detect unconfigured fields.
             const info = @typeInfo(result_type);
 
+            var conclusion: bool = true;
+
             inline for (info.Struct.fields) |field| {
                 switch (@typeInfo(field.type)) {
                     .Union => {
@@ -372,7 +374,7 @@ pub fn Argparse(comptime result_type: type) type {
                                         } else {
                                             // if required: error
                                             writer.print("error: missing required argument '{s}'\n", .{arg_entry.long}) catch {};
-                                            return error.InvalidFormat;
+                                            conclusion = false;
                                         }
                                     },
                                 }
@@ -382,10 +384,12 @@ pub fn Argparse(comptime result_type: type) type {
                                 writer.print("error: Field {s}.{s} is not configured\n", .{ @typeName(result_type), field.name }) catch {};
                                 return error.IncompleteConfiguration;
                             }
-                        } else {}
+                        }
                     },
                 }
             }
+
+            if(!conclusion) return error.InvalidFormat;
         }
 
         // A parameter is an argument with a value (--key=value). If a default-value is provided in the params-struct, it will be considered optional.
